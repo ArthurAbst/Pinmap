@@ -11,7 +11,8 @@ import * as store from "./store.js";
 let remote = null;      // adapter: supabase or the local test fake
 let user = null;
 let status = { state: "off", lastSync: null, error: "" };
-const listeners = { status: [], data: [] };
+const listeners = { status: [], data: [], prefs: [] };
+let lastPrefs = null;
 const emit = (n, v) => listeners[n].forEach((f) => f(v));
 const setStatus = (s) => { status = { ...status, ...s }; emit("status", { ...status, user }); };
 
@@ -54,6 +55,7 @@ export async function signOut() {
   await syncNow().catch(() => {});
   await remote.signOut();
   user = null;
+  lastPrefs = null;
   setStatus({ state: "signed-out", lastSync: null });
 }
 
@@ -76,6 +78,7 @@ export function syncNow() {
         await push();
         const changedCount = await pull();
         if (changedCount) emit("data", changedCount);
+        await pullPrefs();
       } while (again);
       setStatus({ state: "idle", lastSync: new Date(), error: "" });
       downloadThumbs();   // background
@@ -160,6 +163,17 @@ async function pull() {
   return n;
 }
 
+// ---------- account preferences (e.g. the chosen background) ----------
+async function pullPrefs() {
+  const p = await remote.getPrefs().catch(() => null);
+  if (p && JSON.stringify(p) !== JSON.stringify(lastPrefs)) { lastPrefs = p; emit("prefs", p); }
+}
+export async function setPrefs(patch) {
+  if (!remote || !user) return;
+  lastPrefs = { ...(lastPrefs || {}), ...patch };
+  await remote.setPrefs(lastPrefs).catch((e) => console.warn("prefs not saved", e));
+}
+
 // ---------- photo files ----------
 const inflight = new Map();
 /** Image data of a photo: local copy, or downloaded from the cloud (and kept). kind: "thumb" | "blob". */
@@ -198,6 +212,8 @@ function supabaseRemote(url, key) {
       return ok(await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }));
     },
     async signOut() { await sb.auth.signOut(); },
+    async getPrefs() { return (await sb.auth.getUser()).data.user?.user_metadata?.pinmap || null; },
+    async setPrefs(p) { ok(await sb.auth.updateUser({ data: { pinmap: p } })); },
     async pull(table, since) {
       const out = [];
       for (let from = 0; ; from += 1000) {

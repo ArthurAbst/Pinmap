@@ -7,6 +7,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 rows = {"places": {}, "photos": {}}
+prefs = {}
 files = {}
 lock = threading.Lock()
 
@@ -38,6 +39,8 @@ class H(SimpleHTTPRequestHandler):
                 out = [r for r in rows[q["table"]].values()
                        if r["user_id"] == q["user"] and (not q["since"] or r["server_at"] > q["since"])]
             return self.send_json(sorted(out, key=lambda r: r["server_at"]))
+        if u.path == "/fake/prefs":
+            return self.send_json(prefs.get(q["user"]))
         if u.path == "/fake/file":
             data = files.get(q["path"])
             if data is None:
@@ -57,6 +60,9 @@ class H(SimpleHTTPRequestHandler):
                 for r in json.loads(self.body()):
                     r["server_at"] = now()
                     rows[q["table"]][r["id"]] = r
+            return self.send_json({"ok": True})
+        if u.path == "/fake/prefs":
+            prefs[q["user"]] = json.loads(self.body())
             return self.send_json({"ok": True})
         if u.path == "/fake/remove":
             for p in json.loads(self.body()):

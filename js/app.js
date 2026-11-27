@@ -5,6 +5,7 @@ import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js";
 import * as store from "./store.js";
 import * as sync from "./sync.js";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { BACKDROPS, paint } from "./backdrops.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -35,11 +36,13 @@ let map, search;
   for (const p of await store.allPlaces()) state.places.set(p.id, p);
   sync.on("status", renderAccount);
   sync.on("data", reloadFromStore);
+  sync.on("prefs", (p) => { if (p?.bg && JSON.stringify(p.bg) !== JSON.stringify(state.bg)) applyBg(p.bg, { push: false }); });
   await sync.init({ url: SUPABASE_URL, key: SUPABASE_KEY, fake: new URLSearchParams(location.search).has("fake") });
   renderAccount(sync.getStatus());
 
   map = createMap($("#map"), { world50, labels, initialView });
   window.__map = map;   // handy for debugging in the console
+  applyBg(loadBg(), { push: false });
   search = createSearch(labels);
   await repairPlaces();
   refresh();
@@ -700,6 +703,82 @@ $("#fileImport").addEventListener("change", async (e) => {
   } catch (err) { toast("Import failed: " + err.message, 5000); }
 });
 
+// ---------------- background ("the wall behind the map") ----------------
+const BG_KEY = "pinmap:bg", BG_IMG_KEY = "pinmap:bgimg";
+function loadBg() { try { return JSON.parse(localStorage.getItem(BG_KEY)) || { id: "wood" }; } catch { return { id: "wood" }; } }
+async function bgImage(bg) {
+  try {
+    let blob = null;
+    if (bg.photoId) {
+      const ph = await store.getPhoto(bg.photoId);
+      if (ph && !ph.deleted) blob = ph.blob || (await sync.fetchBlob(ph, "blob")) || ph.thumb;
+    } else if (bg.upload) {
+      const u = localStorage.getItem(BG_IMG_KEY);
+      if (u) blob = dataURLBlob(u);
+    }
+    return blob ? await createImageBitmap(blob) : null;
+  } catch { return null; }
+}
+function dataURLBlob(u) {
+  const [h, b] = u.split(","); const bin = atob(b); const a = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return new Blob([a], { type: (h.match(/:(.*?);/) || [, "image/jpeg"])[1] });
+}
+async function applyBg(bg, { push = true } = {}) {
+  state.bg = bg;
+  try { localStorage.setItem(BG_KEY, JSON.stringify(bg)); } catch { /* ignore */ }
+  if (bg.id === "photo") {
+    const img = await bgImage(bg);
+    if (state.bg !== bg) return;
+    map.setBackdrop(img ? "photo" : "wood", img);
+  } else map.setBackdrop(bg.id);
+  if (push && !bg.upload) sync.setPrefs({ bg });   // an uploaded picture stays on this device
+  if (!$("#bgPick").hidden) markBg();
+}
+
+let swatches = null, bgURLs = [];
+async function openBgPicker() {
+  closePopover(); hidePeek();
+  if (innerWidth <= 700) { toggleList(false); closeCard(); }
+  if (!swatches) {
+    swatches = BACKDROPS.map((b) => {
+      const c = document.createElement("canvas"); c.width = 300; c.height = 200;
+      paint(c.getContext("2d"), 300, 200, b.id, 0.5, null, "#e9edef");
+      return { ...b, url: c.toDataURL("image/jpeg", 0.8) };
+    });
+  }
+  $("#bgList").innerHTML = swatches.map((b) => `<button class="bg-sw" data-bg="${b.id}"><img src="${b.url}" alt="">${esc(b.label)}</button>`).join("");
+  bgURLs.forEach((u) => URL.revokeObjectURL(u)); bgURLs = [];
+  const photos = (await store.listPhotos()).slice(0, 24);
+  $("#bgPhotos").innerHTML = photos.length
+    ? photos.map((ph) => `<button data-photo="${esc(ph.id)}" aria-label="Use this photo"><img alt=""></button>`).join("")
+    : `<p>Photos you add to your places can be used here.</p>`;
+  photos.forEach(async (ph) => {
+    const u = await photoURL(ph, "thumb"); if (!u) return;
+    bgURLs.push(u); const img = $(`#bgPhotos [data-photo="${CSS.escape(ph.id)}"] img`); if (img) img.src = u;
+  });
+  $("#bgPick").hidden = false;
+  markBg();
+}
+function markBg() {
+  const bg = state.bg || {};
+  document.querySelectorAll("#bgList [data-bg]").forEach((b) => b.setAttribute("aria-pressed", bg.id === b.dataset.bg));
+  document.querySelectorAll("#bgPhotos [data-photo]").forEach((b) => b.setAttribute("aria-pressed", bg.id === "photo" && bg.photoId === b.dataset.photo));
+}
+function closeBgPicker() { $("#bgPick").hidden = true; bgURLs.forEach((u) => URL.revokeObjectURL(u)); bgURLs = []; }
+$("#zBg").addEventListener("click", () => ($("#bgPick").hidden ? openBgPicker() : closeBgPicker()));
+$("#bgList").addEventListener("click", (e) => { const b = e.target.closest("[data-bg]"); if (b) applyBg({ id: b.dataset.bg }); });
+$("#bgPhotos").addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) applyBg({ id: "photo", photoId: b.dataset.photo }); });
+$("#bgFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const [blob] = await resizeImage(f, 1600, 0.8);
+    const url = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+    try { localStorage.setItem(BG_IMG_KEY, url); } catch { toast("That picture is too large to remember — try a smaller one.", 4000); return; }
+    applyBg({ id: "photo", upload: true });
+  } catch { toast("Couldn't read that image.", 3000); }
+});
+
 // ---------------- account & sync ----------------
 function renderAccount(st) {
   const box = $("#acct");
@@ -861,7 +940,7 @@ document.addEventListener("click", (e) => {
 // ---------------- global ----------------
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
   const w = b.dataset.close;
-  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else if (w === "auth") closeAuth(); else toggleList(false);
+  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else if (w === "auth") closeAuth(); else if (w === "bg") closeBgPicker(); else toggleList(false);
 }));
 $("#zIn").addEventListener("click", () => map.zoomBy(2));
 $("#zOut").addEventListener("click", () => map.zoomBy(0.5));
@@ -878,6 +957,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); }
   if (e.key === "Escape") {
     if (!$("#auth").hidden) closeAuth();
+    else if (!$("#bgPick").hidden) closeBgPicker();
     else if (!$("#peek").hidden) hidePeek();
     else if (!$("#pop").hidden) closePopover();
     else if (state.pick) endPick();

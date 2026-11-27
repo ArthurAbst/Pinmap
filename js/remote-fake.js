@@ -15,6 +15,8 @@ export function createFakeRemote() {
     },
     async signUp(email, password) { const u = await this.signIn(email, password); return { user: u, session: { user: u } }; },
     async signOut() { localStorage.removeItem(key); authFn(null); },
+    async getPrefs() { return j(await fetch(`/fake/prefs?user=${read().id}`)); },
+    async setPrefs(p) { await j(await fetch(`/fake/prefs?user=${read().id}`, { method: "POST", body: JSON.stringify(p) })); },
     async pull(table, since) { return j(await fetch(`/fake/pull?table=${table}&since=${encodeURIComponent(since || "")}&user=${read().id}`)); },
     async upsert(table, rows) { await j(await fetch(`/fake/upsert?table=${table}`, { method: "POST", body: JSON.stringify(rows) })); },
     async upload(path, blob) { await j(await fetch(`/fake/file?path=${encodeURIComponent(path)}`, { method: "PUT", body: blob })); },

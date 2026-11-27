@@ -99,6 +99,7 @@ export async function deletePhoto(id, { silent = false } = {}) {
   await putRaw("photos", { id, placeId: ph.placeId, uploaded: ph.uploaded, deleted: true, dirty: true, updatedAt: Date.now() });
   if (!silent) changed();
 }
+export async function listPhotos() { return (await getAll("photos")).filter((p) => !p.deleted).sort((a, b) => (b.takenAt || b.addedAt) - (a.takenAt || a.addedAt)); }
 export async function countPhotos() { return (await getAll("photos")).filter((p) => !p.deleted).length; }
 
 // ---------- for sync ----------

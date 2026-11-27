@@ -15,6 +15,7 @@
   <input id="importFiles" type="file" accept="image/*" multiple tabindex="-1">
   <input id="cFiles" type="file" accept="image/*" multiple tabindex="-1">
   <input id="fileImport" type="file" accept=".json,application/json" tabindex="-1">
+  <input id="bgFile" type="file" accept="image/*" tabindex="-1">
 </div>
 <div id="app">
   <canvas id="map" aria-label="World map. Click to place a pin."></canvas>
@@ -103,6 +104,15 @@
     <button id="zIn" aria-label="Zoom in">+</button>
     <button id="zOut" aria-label="Zoom out">−</button>
     <button id="zHome" aria-label="Whole world">⌂</button>
+    <button id="zBg" aria-label="Background" title="Background"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 16l5-5 4 4 3-3 5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="15.5" cy="9" r="1.6" fill="currentColor"/></svg></button>
+  </div>
+
+  <div id="bgPick" class="panel bgpick" hidden aria-label="Background">
+    <div class="panel-head"><h2>Background</h2><button class="x" data-close="bg" aria-label="Close">×</button></div>
+    <div id="bgList" class="bg-grid"></div>
+    <span class="lbl">One of your photos</span>
+    <div id="bgPhotos" class="bg-photos"></div>
+    <button type="button" class="btn small" data-file="bgFile">Upload an image</button>
   </div>
 
   <div id="hint" class="hint" hidden>Click anywhere on the map to stick a pin, or search for a place above.</div>

@@ -9,12 +9,13 @@
 //     ends, or mid-gesture if the snapshot gets too blurry or runs out of margin.
 //  3. Label collisions use a grid hash instead of a flat list.
 /* global d3, topojson */
+import { paint } from "./backdrops.js";
 
 const W0 = 1000;                       // projected world width in world units
 const CELL = 50;                       // geometry chunk size in world units
 const MARGIN = 0.3;                    // snapshot margin around the viewport (fraction)
 const PIN_COLORS = { visited: "#d8312b", wish: "#e8a317" };
-const COLOR_VARS = ["desk", "water", "land", "visited", "coast", "border", "admin1", "river", "grat",
+const COLOR_VARS = ["paper", "desk", "water", "land", "visited", "coast", "border", "admin1", "river", "grat",
   "label", "label-soft", "label-water", "label-phys", "label-halo", "landmark", "pin-label", "accent"];
 
 export function createMap(canvas, { world50, labels, initialView }) {
@@ -51,6 +52,9 @@ export function createMap(canvas, { world50, labels, initialView }) {
   let W = 0, H = 0, dpr = 1, T = d3.zoomIdentity, fitK = 1, ready = false;
   let S = null;          // transform the snapshot was rendered at
   let dirty = true, interacting = false, raf = 0;
+  // background "wall" behind the map sheet (fixed to the screen, repainted on resize/theme)
+  const wall = document.createElement("canvas");
+  let wallId = "wood", wallImg = null, wallDirty = true;
   const listeners = {};
   const widthCache = new Map();
   const emit = (n, v) => (listeners[n] || []).forEach((f) => f(v));
@@ -76,7 +80,10 @@ export function createMap(canvas, { world50, labels, initialView }) {
   // First view: the saved one, else the user's pins, else a world map that fills the screen.
   function startTransform() {
     const v = initialView ? initialView() : null;
-    const coverK = Math.max(W / W0, H / H0) * 1.15;
+    // default: the whole sheet on the wall (landscape) / a tall slice of it (portrait phones)
+    const sheetW = W0 + 32, sheetH = H0 + 32;
+    const sheetK = W >= H ? Math.min((W - 90) / sheetW, (H - 160) / sheetH) : (H * 0.58) / sheetH;
+    const coverK = sheetK;
     if (v && v.z != null) return centerT(v.lon, v.lat, kOfZ(v.z));
     if (v && v.points && v.points.length) {
       const xy = v.points.map((p) => projection(p));
@@ -87,13 +94,15 @@ export function createMap(canvas, { world50, labels, initialView }) {
       const ll = projection.invert([(x0 + x1) / 2, (y0 + y1) / 2]);
       return centerT(ll[0], ll[1], k);
     }
-    return centerT(30, 20, coverK);
+    const cx = W >= H ? W0 / 2 : projection([30, 0])[0];
+    return d3.zoomIdentity.translate(W / 2, H / 2 + 24).scale(sheetK).translate(-cx, -H0 / 2);
   }
 
   function resize() {
     const r = canvas.getBoundingClientRect();
     W = r.width; H = r.height; dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    wallDirty = true;
     fitK = Math.min(W / W0, (H - 60) / H0) * 0.96;
     zoom.scaleExtent([fitK * 0.8, fitK * 900]).extent([[0, 0], [W, H]]);
     if (!ready) { ready = true; sel.call(zoom.transform, startTransform()); }
@@ -108,6 +117,7 @@ export function createMap(canvas, { world50, labels, initialView }) {
   probe.style.display = "none"; document.body.appendChild(probe);
   function readColors() {
     for (const v of COLOR_VARS) { probe.style.color = `var(--${v})`; C[v] = getComputedStyle(probe).color; }
+    wallDirty = true;
     invalidate();
   }
   readColors();
@@ -157,6 +167,12 @@ export function createMap(canvas, { world50, labels, initialView }) {
     const fill = (chunks) => { for (const c of chunks) if (vis(c.b)) g.fill(c.p); };
     const stroke = (chunks) => { for (const c of chunks) if (vis(c.b)) g.stroke(c.p); };
 
+    // the map is a printed sheet pinned to the wall: paper with a soft shadow
+    const pm = 16;
+    g.save();
+    g.shadowColor = "rgba(0,0,0,.38)"; g.shadowBlur = 22 * sd; g.shadowOffsetX = 0; g.shadowOffsetY = 8 * sd;
+    g.fillStyle = C.paper; g.fillRect(-pm, -pm, W0 + 2 * pm, H0 + 2 * pm);
+    g.restore();
     g.fillStyle = C.water; g.fill(sphere);
     g.save(); g.clip(sphere);
     g.strokeStyle = C.grat; g.lineWidth = 0.8 * px; g.stroke(z > 4.6 ? grat5 : grat10);
@@ -188,6 +204,12 @@ export function createMap(canvas, { world50, labels, initialView }) {
     g.setTransform(sd, 0, 0, sd, sd * ox, sd * oy);
     G = g;
     const grid = new Grid();
+    for (const [cx, cy] of [[-pm + 9, -pm + 9], [W0 + pm - 9, -pm + 9], [-pm + 9, H0 + pm - 9], [W0 + pm - 9, H0 + pm - 9]]) {
+      const sx = T.k * cx + T.x, sy = T.k * cy + T.y;
+      if (sx < -ox - 30 || sy < -oy - 30 || sx > W + ox + 30 || sy > H + oy + 30) continue;
+      pushpin(sx - 6, sy + 14, "#d8312b", 1.1);
+      grid.add([sx - 12, sy - 12, 24, 30]);
+    }
     layoutPins(grid, z, ox, oy);
     drawLabels(grid, z, ox, oy);
     S = { k: T.k, x: T.x, y: T.y };
@@ -196,8 +218,13 @@ export function createMap(canvas, { world50, labels, initialView }) {
 
   // ---------- composite: snapshot + live pins ----------
   function composite() {
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = C.desk; ctx.fillRect(0, 0, W, H);
+    if (wallDirty || wall.width !== canvas.width || wall.height !== canvas.height) {
+      wall.width = canvas.width; wall.height = canvas.height;
+      paint(wall.getContext("2d"), wall.width, wall.height, wallId, dpr, wallImg, C.desk);
+      wallDirty = false;
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(wall, 0, 0);
     const s = T.k / S.k, ox = W * MARGIN, oy = H * MARGIN;
     ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * (T.x - s * (S.x + ox)), dpr * (T.y - s * (S.y + oy)));
     ctx.imageSmoothingEnabled = true;
@@ -432,6 +459,7 @@ export function createMap(canvas, { world50, labels, initialView }) {
       invalidate();
     },
     setVisited(set) { visited = set; invalidate(); },
+    setBackdrop(id, image = null) { wallId = id; wallImg = image; wallDirty = true; schedule(); },
     setTarget(ll) { target = ll ? projection(ll) : null; schedule(); },
     screenOf(lon, lat) { const [wx, wy] = projection([lon, lat]); return [T.k * wx + T.x, T.k * wy + T.y]; },
     // Country under a point. Simplified coastlines leave seaside towns "in the sea",
