@@ -594,24 +594,53 @@ addEventListener("drop", (e) => {
   startImport([...e.dataTransfer.files]);
 });
 
+// ---------------- endless photo strips (preview and full screen) ----------------
+// A copy of the last photo goes before the first and a copy of the first after the last.
+// When scrolling settles on a copy, the strip silently jumps to the real photo, so
+// "next" after the last photo is the first one, and "previous" before the first is the last.
+const loopOrder = (n) => (n > 1 ? [n - 1, ...Array.from({ length: n }, (_, i) => i), 0] : Array.from({ length: n }, (_, i) => i));
+function loopTrack(track, n, start, onIndex) {
+  track._off?.();
+  const w = () => track.clientWidth || 1;
+  const pos = () => Math.round(track.scrollLeft / w());
+  const real = () => (n > 1 ? (pos() - 1 + n) % n : pos());
+  let timer = 0;
+  const settle = () => {
+    if (n > 1) {
+      const i = pos();
+      if (i === 0) track.scrollLeft = n * w();          // copy of the last → the real last
+      else if (i === n + 1) track.scrollLeft = w();     // copy of the first → the real first
+    }
+    onIndex?.(real());
+  };
+  const onScroll = () => { onIndex?.(real()); clearTimeout(timer); timer = setTimeout(settle, 140); };
+  track.addEventListener("scroll", onScroll, { passive: true });
+  track.addEventListener("scrollend", settle);
+  track._off = () => { track.removeEventListener("scroll", onScroll); track.removeEventListener("scrollend", settle); clearTimeout(timer); };
+  requestAnimationFrame(() => { track.scrollLeft = (start + (n > 1 ? 1 : 0)) * w(); onIndex?.(start); });
+}
+const stepTrack = (track, d) => track.scrollBy({ left: d * track.clientWidth, behavior: "smooth" });
+
 // lightbox
 let lbURLs = [];
 function openLightbox(photos, i) {
   const track = $("#lbTrack");
   lbURLs = [];
-  track.innerHTML = photos.map((p, j) => `<figure><img alt="Photo ${j + 1}"></figure>`).join("");
+  track.innerHTML = loopOrder(photos.length).map((j) => `<figure data-i="${j}"><img alt="Photo ${j + 1}"></figure>`).join("");
   photos.forEach(async (ph, j) => {
     const u = await photoURL(ph, "blob");
     if (!u) return;
     if ($("#lightbox").hidden) return URL.revokeObjectURL(u);
-    lbURLs.push(u); const img = track.children[j]?.querySelector("img"); if (img) img.src = u;
+    lbURLs.push(u);
+    track.querySelectorAll(`[data-i="${j}"] img`).forEach((img) => { img.src = u; });
   });
   $("#lightbox").hidden = false;
-  track.children[i]?.scrollIntoView({ inline: "center", block: "nearest" });
+  $("#lbPrev").hidden = $("#lbNext").hidden = photos.length < 2;
+  loopTrack(track, photos.length, i);
   $("#lbClose").focus();
 }
-function closeLightbox() { $("#lightbox").hidden = true; $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
-function lbStep(d) { const t = $("#lbTrack"); t.scrollBy({ left: d * t.clientWidth, behavior: "smooth" }); }
+function closeLightbox() { $("#lightbox").hidden = true; $("#lbTrack")._off?.(); $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
+function lbStep(d) { stepTrack($("#lbTrack"), d); }
 $("#lbPrev").addEventListener("click", () => lbStep(-1));
 $("#lbNext").addEventListener("click", () => lbStep(1));
 $("#lbClose").addEventListener("click", closeLightbox);
@@ -633,27 +662,26 @@ async function showPeek(id, pinned) {
   peek.urls.forEach((u) => URL.revokeObjectURL(u));
   peek.photos = photos;
   peek.urls = [];
-  $("#pkTrack").innerHTML = photos.map((_, i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button>`).join("");
+  $("#pkTrack").innerHTML = loopOrder(photos.length).map((i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button>`).join("");
   photos.forEach(async (ph, i) => {
     const u = await photoURL(ph, ph.blob ? "blob" : "thumb");
     if (!u) return;
     if (peek.id !== id) return URL.revokeObjectURL(u);
     peek.urls.push(u);
-    const img = $(`#pkTrack [data-i="${i}"] img`); if (img) img.src = u;
+    document.querySelectorAll(`#pkTrack [data-i="${i}"] img`).forEach((img) => { img.src = u; });
   });
   $("#pkPhotos").hidden = !photos.length;
   $("#pkEmpty").hidden = !!photos.length;
   $("#pkPrev").hidden = $("#pkNext").hidden = photos.length < 2;
-  updatePeekCount();
   $("#pkOpen").textContent = photos.length ? "Open place" : "Add photos & notes";
   $("#peek").hidden = false;
-  $("#pkTrack").scrollLeft = 0;
+  loopTrack($("#pkTrack"), photos.length, 0, updatePeekCount);
   positionPeek();
 }
 function hidePeek() {
   clearTimeout(peek.hideTimer); clearTimeout(peek.showTimer);
   if ($("#peek").hidden) return;
-  $("#peek").hidden = true; $("#pkTrack").innerHTML = "";
+  $("#peek").hidden = true; $("#pkTrack")._off?.(); $("#pkTrack").innerHTML = "";
   peek.urls.forEach((u) => URL.revokeObjectURL(u)); peek.urls = []; peek.id = null; peek.pinned = false;
 }
 function positionPeek() {
@@ -667,14 +695,12 @@ function positionPeek() {
   const left = Math.max(12, Math.min(innerWidth - w - 12, x + 7 - w / 2));
   el.style.left = left + "px"; el.style.top = Math.min(innerHeight - h - 12, top) + "px";
 }
-function updatePeekCount() {
-  const t = $("#pkTrack"), n = peek.photos.length;
-  const i = n ? Math.round(t.scrollLeft / Math.max(1, t.clientWidth)) : 0;
+function updatePeekCount(i = 0) {
+  const n = peek.photos.length;
   $("#pkCount").textContent = n > 1 ? `${i + 1} / ${n}` : n === 1 ? "1 photo" : "";
 }
-$("#pkTrack").addEventListener("scroll", updatePeekCount, { passive: true });
-$("#pkPrev").addEventListener("click", () => { const t = $("#pkTrack"); t.scrollBy({ left: -t.clientWidth, behavior: "smooth" }); });
-$("#pkNext").addEventListener("click", () => { const t = $("#pkTrack"); t.scrollBy({ left: t.clientWidth, behavior: "smooth" }); });
+$("#pkPrev").addEventListener("click", () => stepTrack($("#pkTrack"), -1));
+$("#pkNext").addEventListener("click", () => stepTrack($("#pkTrack"), 1));
 $("#pkTrack").addEventListener("click", (e) => { const b = e.target.closest("[data-i]"); if (b) openLightbox(peek.photos, +b.dataset.i); });
 $("#pkOpen").addEventListener("click", () => { const id = peek.id; hidePeek(); openCard(id); });
 $("#pkClose").addEventListener("click", hidePeek);
