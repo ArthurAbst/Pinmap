@@ -184,8 +184,21 @@ function onPinClick(id) {
   showPeek(id, true);
 }
 
+// On a phone every panel is a bottom sheet, so only one may be open at a time.
+const isPhone = () => innerWidth <= 700;
+function onlySheet(keep) {
+  if (!isPhone()) return;
+  if (keep !== "list" && !$("#list").hidden) toggleList(false);
+  if (keep !== "card" && !$("#card").hidden) closeCard();
+  if (keep !== "import") $("#import").hidden = true;   // pending photo groups stay; the camera button brings them back
+  if (keep !== "peek") hidePeek();
+  if (keep !== "pop" && !$("#pop").hidden) closePopover();
+  updateImportBadge();
+}
+
 function openPopover(d) {
   closeResults();
+  onlySheet("pop"); hidePeek();
   state.draft = { ...d, status: state.draft?.status && state.draft.status !== "label" ? state.draft.status : "visited" };
   $("#pName").value = d.name || "";
   $("#pName").placeholder = "Name this place";
@@ -201,10 +214,14 @@ function openPopover(d) {
   $("#pAdd").textContent = state.pick ? `Pin it + add ${plural(state.pick.files.length, "photo")}` : "Stick a pin";
   map.setTarget([d.lon, d.lat]);
   $("#pop").hidden = false;
+  $("#pickBar").hidden = true;          // the popover itself says the photos will be added
   positionPopover();
   if (!d.name) $("#pName").focus();
 }
-function closePopover() { $("#pop").hidden = true; state.draft = null; map.setTarget(null); }
+function closePopover() {
+  $("#pop").hidden = true; state.draft = null; map.setTarget(null);
+  if (state.pick) $("#pickBar").hidden = false;
+}
 function positionPopover() {
   const pop = $("#pop");
   if (pop.hidden || !state.draft || innerWidth <= 700) return;
@@ -251,7 +268,7 @@ async function createPlace({ name, lon, lat, status = "visited", kind = "", coun
 let saveTimer, photoURLs = [];
 async function openCard(id) {
   const p = state.places.get(id); if (!p) return;
-  closePopover(); hidePeek();
+  closePopover(); hidePeek(); onlySheet("card");
   state.current = id;
   $("#cName").value = p.name;
   $("#cMeta").textContent = [p.kind ? kindLabel(p.kind) : "", p.country, fmtLL(p.lon, p.lat)].filter(Boolean).join(" · ");
@@ -261,7 +278,6 @@ async function openCard(id) {
   renderVisits();
   resetDelete();
   $("#card").hidden = false;
-  if (innerWidth <= 700) { $("#list").hidden = true; $("#import").hidden = true; }
   await renderPhotos();
 }
 function closeCard() { $("#card").hidden = true; state.current = null; revokePhotos(); }
@@ -405,7 +421,7 @@ const km = (a, b) => Math.hypot((a.lon - b.lon) * Math.cos((a.lat * Math.PI) / 1
 async function startImport(files) {
   files = files.filter(isImage);
   if (!files.length) return;
-  closeCard(); toggleList(false); closePopover(); endPick(false);
+  closeCard(); toggleList(false); closePopover(); hidePeek(); endPick(false);
   $("#import").hidden = false;
   $("#importNote").textContent = "";
   $("#groups").innerHTML = `<p class="empty">Reading ${plural(files.length, "photo")}…</p>`;
@@ -457,6 +473,7 @@ function visitsText(vs) {
 }
 function renderGroups() {
   imp.urls.forEach((u) => URL.revokeObjectURL(u)); imp.urls = [];
+  updateImportBadge();
   if (!imp.groups.length) { $("#import").hidden = true; return; }
   const total = imp.groups.reduce((n, g) => n + g.files.length, 0);
   $("#importNote").textContent = `${plural(total, "photo")} to place. Location and date come from the photos themselves; check and confirm each group.`;
@@ -543,12 +560,25 @@ function endPick(reopen = true) {
   if (!state.pick) return;
   state.pick = null;
   $("#pickBar").hidden = true;
-  if (reopen) { if (imp.groups.length) $("#import").hidden = false; }
+  if (reopen && imp.groups.length) openImportPanel();
+  updateImportBadge();
   refresh();
 }
 $("#pickCancel").addEventListener("click", () => { closePopover(); endPick(); });
 // attach a picked group, then remove it from the import list
 async function attachAndDrop(g, id) { await attachGroup(g, id); if (imp.groups.includes(g)) dropGroup(g); }
+
+// photos waiting to be placed: the camera button shows their count and reopens the panel
+function updateImportBadge() {
+  const n = imp.groups.reduce((k, g) => k + g.files.length, 0);
+  const waiting = n > 0 && $("#import").hidden && !state.pick;
+  $("#btnPhotos").dataset.file = waiting ? "" : "importFiles";
+  let b = $("#btnPhotos .count");
+  if (waiting) { if (!b) { b = document.createElement("span"); b.className = "count"; $("#btnPhotos").appendChild(b); } b.textContent = n; }
+  else b?.remove();
+}
+function openImportPanel() { onlySheet("import"); $("#import").hidden = false; updateImportBadge(); }
+$("#btnPhotos").addEventListener("click", () => { if (!$("#btnPhotos").dataset.file && imp.groups.length) openImportPanel(); });
 
 // top-bar button + drag & drop anywhere on the map
 $("#importFiles").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; startImport(f); });
@@ -593,7 +623,7 @@ async function showPeek(id, pinned) {
   clearTimeout(peek.hideTimer);
   if (peek.id === id && !$("#peek").hidden) { peek.pinned ||= pinned; return; }
   peek.id = id; peek.pinned = pinned;
-  closePopover();
+  closePopover(); onlySheet("peek");
   $("#pkName").textContent = p.name;
   $("#pkMeta").textContent = [p.status === "wish" ? "Want to go" : p.visits?.map(fmtVisit).slice(0, 2).join(", "), p.country].filter(Boolean).join(" · ");
   $("#pkNotes").textContent = (p.notes || "").trim();
@@ -654,7 +684,7 @@ $("#peek").addEventListener("mouseleave", () => { peek.over = false; if (!peek.p
 // ---------------- my places list ----------------
 function toggleList(show = $("#list").hidden) {
   $("#list").hidden = !show; $("#btnList").setAttribute("aria-expanded", show);
-  if (show) { $("#import").hidden = true; if (innerWidth <= 700) closeCard(); renderList(); }
+  if (show) { onlySheet("list"); $("#import").hidden = true; renderList(); }
 }
 $("#btnList").addEventListener("click", () => toggleList());
 
@@ -879,14 +909,14 @@ $("#results").addEventListener("click", async (e) => {
 // Buttons open their file input programmatically inside the tap handler; the inputs stay in
 // the layout (not display:none), which is what iOS / in-app webviews need to show the picker.
 document.addEventListener("click", (e) => {
-  const b = e.target.closest("[data-file]"); if (!b) return;
+  const b = e.target.closest("[data-file]"); if (!b || !b.dataset.file) return;
   document.getElementById(b.dataset.file).click();
 });
 
 // ---------------- global ----------------
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
   const w = b.dataset.close;
-  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else if (w === "auth") closeAuth(); else toggleList(false);
+  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; updateImportBadge(); } else if (w === "auth") closeAuth(); else toggleList(false);
 }));
 $("#zIn").addEventListener("click", () => map.zoomBy(2));
 $("#zOut").addEventListener("click", () => map.zoomBy(0.5));
