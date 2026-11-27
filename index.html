@@ -76,6 +76,21 @@
 
   <div id="dropzone" class="dropzone" hidden><div>Drop photos — we'll put them on the map</div></div>
 
+  <div id="peek" class="peek" hidden>
+    <div id="pkPhotos" class="pk-photos">
+      <div id="pkTrack" class="pk-track"></div>
+      <button id="pkPrev" class="pk-nav prev" aria-label="Previous photo">‹</button>
+      <button id="pkNext" class="pk-nav next" aria-label="Next photo">›</button>
+    </div>
+    <div class="pk-body">
+      <div class="pk-head"><b id="pkName"></b><button id="pkClose" class="x" aria-label="Close preview">×</button></div>
+      <p id="pkMeta" class="meta"></p>
+      <p id="pkEmpty" class="pk-empty">No photos yet</p>
+      <p id="pkNotes" class="pk-notes"></p>
+      <div class="pk-foot"><span id="pkCount" class="saved"></span><button id="pkOpen" class="btn small">Open place</button></div>
+    </div>
+  </div>
+
   <div id="pop" class="pop" hidden>
     <input id="pName" aria-label="Name of the new place">
     <p id="pMeta" class="meta"></p>

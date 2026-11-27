@@ -13,11 +13,11 @@
 const W0 = 1000;                       // projected world width in world units
 const CELL = 50;                       // geometry chunk size in world units
 const MARGIN = 0.3;                    // snapshot margin around the viewport (fraction)
-const PIN_COLORS = { visited: "#d8312b", lived: "#2c62c9", wish: "#e8a317" };
+const PIN_COLORS = { visited: "#d8312b", wish: "#e8a317" };
 const COLOR_VARS = ["desk", "water", "land", "visited", "coast", "border", "admin1", "river", "grat",
   "label", "label-soft", "label-water", "label-phys", "label-halo", "landmark", "pin-label", "accent"];
 
-export function createMap(canvas, { world50, labels }) {
+export function createMap(canvas, { world50, labels, initialView }) {
   const projection = d3.geoNaturalEarth1().fitWidth(W0, { type: "Sphere" }).precision(0.2);
   const pathGen = d3.geoPath(projection);
   const H0 = pathGen.bounds({ type: "Sphere" })[1][1];
@@ -29,6 +29,7 @@ export function createMap(canvas, { world50, labels }) {
 
   const base = buildLayers(world50, true);
   const countries = topojson.feature(world50, world50.objects.countries).features;
+  for (const c of countries) c.bounds = d3.geoBounds(c);
   let detail = null, detailLoading = false;
 
   const areaByA3 = new Map();
@@ -60,20 +61,42 @@ export function createMap(canvas, { world50, labels }) {
       interacting = true;
       if (e.sourceEvent && e.sourceEvent.type === "mousedown") canvas.classList.add("grab");
     })
-    .on("end", () => { interacting = false; canvas.classList.remove("grab"); schedule(); })
+    .on("end", () => { interacting = false; canvas.classList.remove("grab"); schedule(); emit("moveend"); })
     .on("zoom", (e) => { T = e.transform; schedule(); emit("move"); });
   const sel = d3.select(canvas).call(zoom).on("dblclick.zoom", null);
 
   function homeTransform() {
     return d3.zoomIdentity.translate((W - W0 * fitK) / 2, (H - H0 * fitK) / 2).scale(fitK);
   }
+  function centerT(lon, lat, k) {
+    const [wx, wy] = projection([lon, lat]);
+    return d3.zoomIdentity.translate(W / 2, H / 2).scale(k).translate(-wx, -wy);
+  }
+  const kOfZ = (z) => (256 * 2 ** z) / W0;
+  // First view: the saved one, else the user's pins, else a world map that fills the screen.
+  function startTransform() {
+    const v = initialView ? initialView() : null;
+    const coverK = Math.max(W / W0, H / H0) * 1.15;
+    if (v && v.z != null) return centerT(v.lon, v.lat, kOfZ(v.z));
+    if (v && v.points && v.points.length) {
+      const xy = v.points.map((p) => projection(p));
+      const xs = xy.map((p) => p[0]), ys = xy.map((p) => p[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      let k = Math.min((W - 120) / Math.max(x1 - x0, 1e-6), (H - 220) / Math.max(y1 - y0, 1e-6));
+      k = Math.max(coverK, Math.min(k, kOfZ(5)));
+      const ll = projection.invert([(x0 + x1) / 2, (y0 + y1) / 2]);
+      return centerT(ll[0], ll[1], k);
+    }
+    return centerT(30, 20, coverK);
+  }
+
   function resize() {
     const r = canvas.getBoundingClientRect();
     W = r.width; H = r.height; dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
     fitK = Math.min(W / W0, (H - 60) / H0) * 0.96;
     zoom.scaleExtent([fitK * 0.8, fitK * 900]).extent([[0, 0], [W, H]]);
-    if (!ready) { ready = true; sel.call(zoom.transform, homeTransform()); }
+    if (!ready) { ready = true; sel.call(zoom.transform, startTransform()); }
     invalidate();
   }
   const ro = new ResizeObserver(resize);
@@ -411,9 +434,31 @@ export function createMap(canvas, { world50, labels }) {
     setVisited(set) { visited = set; invalidate(); },
     setTarget(ll) { target = ll ? projection(ll) : null; schedule(); },
     screenOf(lon, lat) { const [wx, wy] = projection([lon, lat]); return [T.k * wx + T.x, T.k * wy + T.y]; },
+    // Country under a point. Simplified coastlines leave seaside towns "in the sea",
+    // so if the exact point misses, probe rings of points 4–50 km around it.
     countryAt(lon, lat) {
-      const f = countries.find((c) => d3.geoContains(c, [lon, lat]));
+      const hit = ([x, y]) => countries.find((c) => {
+        const [[bx0, by0], [bx1, by1]] = c.bounds;
+        if (y < by0 - 0.01 || y > by1 + 0.01) return false;
+        if (bx0 <= bx1 && (x < bx0 - 0.01 || x > bx1 + 0.01)) return false;
+        return d3.geoContains(c, [x, y]);
+      });
+      let f = hit([lon, lat]);
+      const cos = Math.max(0.2, Math.cos((lat * Math.PI) / 180));
+      for (const km of [4, 10, 25, 50]) {
+        if (f) break;
+        const d = km / 111;
+        for (let a = 0; a < 12 && !f; a++) {
+          const t = (a * Math.PI) / 6;
+          f = hit([lon + (d * Math.cos(t)) / cos, lat + d * Math.sin(t)]);
+        }
+      }
       return f ? { a3: f.properties.a3, iso: f.properties.iso, name: f.properties.name } : null;
+    },
+    getView() {
+      const [wx, wy] = T.invert([W / 2, H / 2]);
+      const ll = projection.invert([wx, wy]);
+      return ll ? { lon: +ll[0].toFixed(3), lat: +ll[1].toFixed(3), z: +ez().toFixed(2) } : null;
     },
     flyTo(lon, lat, z, offsetX = 0) {
       const [wx, wy] = projection([lon, lat]);

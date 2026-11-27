@@ -7,7 +7,7 @@ LAYOUT: map fills the screen; floating search bar on top; side sheets (bottom sh
 */
 :root{
   color-scheme:light dark;
-  --desk:light-dark(#e7ecee,#081119);
+  --desk:light-dark(#eef2f3,#081119);
   --water:light-dark(#d6e8f0,#0f2433);
   --land:light-dark(#fdfdfb,#1a2a36);
   --visited:light-dark(#fbe3b6,#4a3a1c);
@@ -184,3 +184,29 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 /* file inputs stay in the layout (not display:none) so every mobile browser/webview will open them */
 .file-inputs{position:fixed;left:0;bottom:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
 .file-inputs input{width:1px;height:1px}
+
+/* pin preview */
+.peek{position:absolute;z-index:7;width:290px;background:var(--surface);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.peek[hidden]{display:none}
+.pk-photos{position:relative;background:var(--line)}
+.pk-photos[hidden]{display:none}
+.pk-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;height:190px}
+.pk-track::-webkit-scrollbar{display:none}
+.pk-slide{flex:0 0 100%;min-width:0;scroll-snap-align:center;border:0;padding:0;background:none;cursor:zoom-in}
+.pk-slide img{width:100%;height:190px;object-fit:cover;display:block}
+.pk-nav{position:absolute;top:50%;transform:translateY(-50%);width:34px;height:34px;border-radius:50%;border:0;background:rgba(10,20,30,.45);color:#fff;font-size:22px;line-height:1;cursor:pointer}
+.pk-nav.prev{left:8px}.pk-nav.next{right:8px}
+.pk-nav[hidden]{display:none}
+.pk-body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+.pk-head{display:flex;align-items:center;gap:6px}
+.pk-head b{flex:1;font:600 18px/1.2 "Barlow Semi Condensed",var(--ui)}
+.pk-head .x{width:32px;height:32px;font-size:20px}
+.peek .meta{margin:-4px 0 0}
+.pk-empty{margin:0;font-size:14px;color:var(--ink-soft)}
+.pk-empty[hidden],.pk-notes[hidden]{display:none}
+.pk-notes{margin:0;font-size:14px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.pk-foot{display:flex;justify-content:space-between;align-items:center;margin-top:2px}
+@media (max-width:700px){
+  .peek{left:8px!important;right:8px;width:auto;top:auto!important;bottom:8px}
+  .pk-track,.pk-slide img{height:220px}
+}

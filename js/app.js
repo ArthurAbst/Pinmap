@@ -10,7 +10,6 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 const STATUS = [
   { id: "visited", label: "Visited", color: "var(--pin-visited)" },
-  { id: "lived", label: "Lived", color: "var(--pin-lived)" },
   { id: "wish", label: "Want to go", color: "var(--pin-wish)" },
   { id: "label", label: "Label only", color: "var(--pin-label)" },
 ];
@@ -30,18 +29,20 @@ let map, search;
     fetch("data/labels.json").then((r) => r.json()),
     store.init(),
   ]);
-  map = createMap($("#map"), { world50, labels });
+  if (!persistent) toast("Storage is unavailable here — your pins will be lost when the page reloads.", 6000);
+  for (const p of await store.allPlaces()) state.places.set(p.id, p);
+
+  map = createMap($("#map"), { world50, labels, initialView });
   window.__map = map;   // handy for debugging in the console
   search = createSearch(labels);
-  if (!persistent) toast("Storage is unavailable here — your pins will be lost when the page reloads.", 6000);
-
-  for (const p of await store.allPlaces()) state.places.set(p.id, migrate(p));
+  await repairPlaces();
   refresh();
+  map.on("moveend", saveView);
 
   map.on("mapclick", onMapClick);
   map.on("pin", onPinClick);
   map.on("hover", onHover);
-  map.on("move", positionPopover);
+  map.on("move", () => { positionPopover(); positionPeek(); });
   map.on("needDetail", loadDetail);
   setTimeout(loadDetail, 2500);
 })().catch((e) => { console.error(e); toast("Could not load map data: " + e.message, 8000); });
@@ -50,6 +51,32 @@ function loadDetail() {
   if (loadDetail.started) return;
   loadDetail.started = true; map.markDetailLoading();
   fetch("data/world10.json").then((r) => r.json()).then((w) => map.setDetail(w)).catch(() => {});
+}
+
+// start view: last view on this device, else the user's pins, else a full-screen world
+function initialView() {
+  try { const v = JSON.parse(localStorage.getItem("pinmap:view")); if (v && isFinite(v.z)) return v; } catch { /* no storage */ }
+  const pts = [...state.places.values()].filter((p) => p.status !== "label").map((p) => [p.lon, p.lat]);
+  return pts.length ? { points: pts } : null;
+}
+let viewTimer;
+function saveView() {
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => { try { localStorage.setItem("pinmap:view", JSON.stringify(map.getView())); } catch { /* ignore */ } }, 500);
+}
+
+// bring older records up to date: dates → visits, "lived" → "visited", missing country
+async function repairPlaces() {
+  for (const p of state.places.values()) {
+    const before = JSON.stringify(p);
+    migrate(p);
+    if (p.status === "lived") p.status = "visited";
+    if (!p.a3 && p.status !== "label") {
+      const c = map.countryAt(p.lon, p.lat);
+      if (c) { p.a3 = c.a3; p.country = p.country || c.name; }
+    }
+    if (JSON.stringify(p) !== before) await store.putPlace(p);
+  }
 }
 
 // older records stored from/to dates; now a place keeps a list of {y, m} visits
@@ -70,7 +97,7 @@ function addVisit(p, v) {
 function refresh() {
   const list = [...state.places.values()];
   map.setPins(list);
-  map.setVisited(new Set(list.filter((p) => (p.status === "visited" || p.status === "lived") && p.a3).map((p) => p.a3)));
+  map.setVisited(new Set(list.filter((p) => p.status === "visited" && p.a3).map((p) => p.a3)));
   $("#count").textContent = list.filter((p) => p.status !== "label").length;
   $("#hint").hidden = list.length > 0 || !!state.pick;
   if (!$("#list").hidden) renderList();
@@ -84,9 +111,21 @@ function toast(msg, ms = 2600) {
 }
 function onHover(h) {
   const tip = $("#tip");
+  const single = h && h.list.length === 1;
+  // a single pin shows the photo preview (desktop hover); clusters and pick mode keep the tooltip
+  if (single && !state.pick && matchMedia("(hover: hover)").matches) {
+    tip.hidden = true;
+    clearTimeout(peek.hideTimer);
+    clearTimeout(peek.showTimer);
+    const id = h.list[0].id;
+    peek.showTimer = setTimeout(() => showPeek(id, false), 160);
+    return;
+  }
+  clearTimeout(peek.showTimer);
+  if (!peek.pinned) peek.hideTimer = setTimeout(() => { if (!peek.over) hidePeek(); }, 300);
   if (!h) { tip.hidden = true; return; }
-  tip.textContent = state.pick && h.list.length === 1 ? `Add photos to “${h.list[0].name}”`
-    : h.list.length === 1 ? (h.list[0].name || "Unnamed place") : `${h.list.length} places — click to zoom in`;
+  if (single && !state.pick) { tip.hidden = true; return; }   // touch screens: the tap opens the preview
+  tip.textContent = state.pick && single ? `Add photos to “${h.list[0].name}”` : `${h.list.length} places — click to zoom in`;
   tip.style.left = h.x + 14 + "px"; tip.style.top = h.y + 10 + "px"; tip.hidden = false;
 }
 
@@ -96,12 +135,13 @@ function chipsHTML(active) {
 }
 
 function onMapClick({ lon, lat, feature }) {
+  if (!$("#peek").hidden) { hidePeek(); return; }   // first tap outside just closes the preview
   const country = map.countryAt(lon, lat);
   openPopover({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat, country, source: feature ? "map" : "click" });
 }
 function onPinClick(id) {
   if (state.pick) return attachAndDrop(state.pick, id).then(() => endPick());
-  openCard(id);
+  showPeek(id, true);
 }
 
 function openPopover(d) {
@@ -164,7 +204,7 @@ async function createPlace({ name, lon, lat, status = "visited", kind = "", coun
 let saveTimer, photoURLs = [];
 async function openCard(id) {
   const p = state.places.get(id); if (!p) return;
-  closePopover();
+  closePopover(); hidePeek();
   state.current = id;
   $("#cName").value = p.name;
   $("#cMeta").textContent = [p.kind ? kindLabel(p.kind) : "", p.country, fmtLL(p.lon, p.lat)].filter(Boolean).join(" · ");
@@ -247,7 +287,7 @@ $("#cPhotos").addEventListener("click", async (e) => {
   const del = e.target.closest("[data-del]");
   if (del) { await store.deletePhoto(del.dataset.del); await renderPhotos(); return; }
   const ph = e.target.closest("[data-i]");
-  if (ph) openLightbox(+ph.dataset.i);
+  if (ph) openLightbox(cardPhotos, +ph.dataset.i);
 });
 $("#cFiles").addEventListener("change", async (e) => {
   const files = [...e.target.files]; e.target.value = "";
@@ -466,9 +506,9 @@ addEventListener("drop", (e) => {
 
 // lightbox
 let lbURLs = [];
-function openLightbox(i) {
+function openLightbox(photos, i) {
   const track = $("#lbTrack");
-  lbURLs = cardPhotos.map((p) => URL.createObjectURL(p.blob));
+  lbURLs = photos.map((p) => URL.createObjectURL(p.blob));
   track.innerHTML = lbURLs.map((u, j) => `<figure><img src="${u}" alt="Photo ${j + 1}"></figure>`).join("");
   $("#lightbox").hidden = false;
   track.children[i]?.scrollIntoView({ inline: "center", block: "nearest" });
@@ -480,6 +520,64 @@ $("#lbPrev").addEventListener("click", () => lbStep(-1));
 $("#lbNext").addEventListener("click", () => lbStep(1));
 $("#lbClose").addEventListener("click", closeLightbox);
 
+// ---------------- pin preview ("peek"): photos at a glance ----------------
+const peek = { id: null, pinned: false, over: false, photos: [], urls: [], showTimer: 0, hideTimer: 0 };
+async function showPeek(id, pinned) {
+  const p = state.places.get(id); if (!p) return;
+  clearTimeout(peek.hideTimer);
+  if (peek.id === id && !$("#peek").hidden) { peek.pinned ||= pinned; return; }
+  peek.id = id; peek.pinned = pinned;
+  closePopover();
+  $("#pkName").textContent = p.name;
+  $("#pkMeta").textContent = [p.status === "wish" ? "Want to go" : p.visits?.map(fmtVisit).slice(0, 2).join(", "), p.country].filter(Boolean).join(" · ");
+  $("#pkNotes").textContent = (p.notes || "").trim();
+  $("#pkNotes").hidden = !p.notes?.trim();
+  const photos = await store.photosOf(id);
+  if (peek.id !== id) return;
+  peek.urls.forEach((u) => URL.revokeObjectURL(u));
+  peek.photos = photos;
+  peek.urls = photos.map((ph) => URL.createObjectURL(ph.blob));
+  $("#pkTrack").innerHTML = peek.urls.map((u, i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img src="${u}" alt=""></button>`).join("");
+  $("#pkPhotos").hidden = !photos.length;
+  $("#pkEmpty").hidden = !!photos.length;
+  $("#pkPrev").hidden = $("#pkNext").hidden = photos.length < 2;
+  updatePeekCount();
+  $("#pkOpen").textContent = photos.length ? "Open place" : "Add photos & notes";
+  $("#peek").hidden = false;
+  $("#pkTrack").scrollLeft = 0;
+  positionPeek();
+}
+function hidePeek() {
+  clearTimeout(peek.hideTimer); clearTimeout(peek.showTimer);
+  if ($("#peek").hidden) return;
+  $("#peek").hidden = true; $("#pkTrack").innerHTML = "";
+  peek.urls.forEach((u) => URL.revokeObjectURL(u)); peek.urls = []; peek.id = null; peek.pinned = false;
+}
+function positionPeek() {
+  const el = $("#peek");
+  if (el.hidden || !peek.id || innerWidth <= 700) return;
+  const p = state.places.get(peek.id); if (!p) return hidePeek();
+  const [x, y] = map.screenOf(p.lon, p.lat);
+  const w = el.offsetWidth, h = el.offsetHeight;
+  let top = y - 34 - h;                       // above the pin head
+  if (top < 70) top = y + 14;                 // or below the needle
+  const left = Math.max(12, Math.min(innerWidth - w - 12, x + 7 - w / 2));
+  el.style.left = left + "px"; el.style.top = Math.min(innerHeight - h - 12, top) + "px";
+}
+function updatePeekCount() {
+  const t = $("#pkTrack"), n = peek.photos.length;
+  const i = n ? Math.round(t.scrollLeft / Math.max(1, t.clientWidth)) : 0;
+  $("#pkCount").textContent = n > 1 ? `${i + 1} / ${n}` : n === 1 ? "1 photo" : "";
+}
+$("#pkTrack").addEventListener("scroll", updatePeekCount, { passive: true });
+$("#pkPrev").addEventListener("click", () => { const t = $("#pkTrack"); t.scrollBy({ left: -t.clientWidth, behavior: "smooth" }); });
+$("#pkNext").addEventListener("click", () => { const t = $("#pkTrack"); t.scrollBy({ left: t.clientWidth, behavior: "smooth" }); });
+$("#pkTrack").addEventListener("click", (e) => { const b = e.target.closest("[data-i]"); if (b) openLightbox(peek.photos, +b.dataset.i); });
+$("#pkOpen").addEventListener("click", () => { const id = peek.id; hidePeek(); openCard(id); });
+$("#pkClose").addEventListener("click", hidePeek);
+$("#peek").addEventListener("mouseenter", () => { peek.over = true; clearTimeout(peek.hideTimer); });
+$("#peek").addEventListener("mouseleave", () => { peek.over = false; if (!peek.pinned) peek.hideTimer = setTimeout(hidePeek, 300); });
+
 // ---------------- my places list ----------------
 function toggleList(show = $("#list").hidden) {
   $("#list").hidden = !show; $("#btnList").setAttribute("aria-expanded", show);
@@ -489,7 +587,7 @@ $("#btnList").addEventListener("click", () => toggleList());
 
 async function renderList() {
   const all = [...state.places.values()];
-  const been = all.filter((p) => p.status === "visited" || p.status === "lived");
+  const been = all.filter((p) => p.status === "visited");
   const countries = new Set(been.map((p) => p.country).filter(Boolean));
   const photos = await store.countPhotos();
   $("#stats").innerHTML = [["Countries", countries.size], ["Places been", been.length], ["Photos", photos]]
@@ -648,7 +746,8 @@ document.addEventListener("keydown", (e) => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); }
   if (e.key === "Escape") {
-    if (!$("#pop").hidden) closePopover();
+    if (!$("#peek").hidden) hidePeek();
+    else if (!$("#pop").hidden) closePopover();
     else if (state.pick) endPick();
     else if (!$("#card").hidden) closeCard();
   }
