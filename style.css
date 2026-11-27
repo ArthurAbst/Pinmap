@@ -283,3 +283,17 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .lb-bar{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:rgba(20,28,36,.82);color:#fff;border-radius:12px;padding:8px 12px;font-size:15px}
 .lb-bar[hidden]{display:none}
 .lb-bar select{margin-left:8px;height:38px;background:#fff;color:#16212b;border-radius:8px}
+
+/* each trip is its own panel, so it's clear which photos belong to it */
+.trip{background:light-dark(#f4f7f9,#162733);padding:10px 12px 12px;transition:box-shadow .3s}
+.trip.other{background:none;border:1px dashed var(--line)}
+.trip.flash{box-shadow:0 0 0 2px var(--accent)}
+.trip .photos{grid-template-columns:repeat(3,minmax(0,1fr))}
+.add-tile{aspect-ratio:1;border:1.5px dashed light-dark(#b7c3cc,#3a5266);border-radius:8px;background:light-dark(#fff,#12202b);color:var(--ink-soft);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:13px}
+.add-tile span{font-size:26px;line-height:1;color:var(--accent)}
+.add-tile.wide{grid-column:1/-1;aspect-ratio:auto;min-height:72px;flex-direction:row;gap:10px;font-size:15px;font-weight:500;color:var(--ink)}
+.add-tile:hover{border-color:var(--coast)}
+.te-title{width:100%;font-weight:600;font-size:15px}
+.trip-edit{background:light-dark(#fff,#12202b)}
+.trip .saved{margin:2px 0 0}
+@media (prefers-reduced-motion:reduce){.trip{transition:none}}

@@ -313,12 +313,20 @@ const yearOptions = (sel) => { let o = ""; for (let y = new Date().getFullYear()
 function tripEditor(v) {
   const now = new Date();
   return `<div class="trip-edit" data-editing="${v ? esc(v.id) : "new"}">
+    <b class="te-title">${v ? "Change the month of this trip" : "New trip — when was it?"}</b>
     <select data-te="m" aria-label="Month">${monthOptions(v ? v.m : now.getMonth() + 1)}</select>
     <select data-te="y" aria-label="Year">${yearOptions(v ? v.y : now.getFullYear())}</select>
-    <div class="row"><button class="btn small primary" data-te="save">Save</button><button class="linkbtn muted" data-te="cancel">Cancel</button>
+    <div class="row">${v
+      ? `<button class="btn small primary" data-te="save">Save</button>`
+      : `<button class="btn small primary" data-te="saveadd">Create &amp; add photos</button><button class="btn small" data-te="save">Create</button>`}
+    <button class="linkbtn muted" data-te="cancel">Cancel</button>
     ${v ? `<button class="linkbtn danger-l" data-te="del">Delete trip</button>` : ""}</div></div>`;
 }
 const tileHTML = (ph) => `<div class="ph"><button class="ph-open" data-ph="${esc(ph.id)}" aria-label="Open photo"><img alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`;
+// the "+" tile at the end of a trip's photos; wide with the trip's name when the trip is empty
+const addTile = (id, label, empty) => empty
+  ? `<button class="add-tile wide" data-addto="${esc(id)}"><span>＋</span>Add photos to ${esc(label)}</button>`
+  : `<button class="add-tile" data-addto="${esc(id)}" aria-label="Add photos to ${esc(label)}"><span>＋</span>Add</button>`;
 
 async function renderTrips() {
   revokePhotos();
@@ -333,16 +341,15 @@ async function renderTrips() {
     const list = by.get(v.id);
     html += `<section class="trip" data-v="${esc(v.id)}">` + (editingTrip === v.id ? tripEditor(v)
       : `<div class="trip-head"><button class="trip-when" data-edit="${esc(v.id)}" aria-label="Change the month of this trip">${esc(fmtVisit(v))}<span class="pen" aria-hidden="true">✎</span></button>
-         <span class="trip-n">${list.length ? plural(list.length, "photo") : ""}</span>
-         <button class="btn small" data-addto="${esc(v.id)}">Add photos</button></div>`)
-      + `<div class="photos">${list.map(tileHTML).join("")}</div></section>`;
+         <span class="trip-n">${list.length ? plural(list.length, "photo") : "no photos yet"}</span></div>`)
+      + `<div class="photos">${list.map(tileHTML).join("")}${addTile(v.id, fmtVisit(v), !list.length)}</div></section>`;
   }
   const other = by.get(null);
   if (other.length || !p.visits.length) {
-    html += `<section class="trip" data-v=""><div class="trip-head"><b class="trip-other">${p.visits.length ? "Other photos" : "Photos"}</b>
-      <span class="trip-n">${other.length ? plural(other.length, "photo") : ""}</span><button class="btn small" data-addto="">Add photos</button></div>
-      <div class="photos">${other.map(tileHTML).join("")}</div>
-      ${!other.length && !p.visits.length ? `<p class="saved">Photos with a date create their trip automatically.</p>` : ""}</section>`;
+    html += `<section class="trip other" data-v=""><div class="trip-head"><b class="trip-other">${p.visits.length ? "Other photos" : "Photos"}</b>
+      <span class="trip-n">${other.length ? plural(other.length, "photo") : ""}</span></div>
+      <div class="photos">${other.map(tileHTML).join("")}${addTile("", p.visits.length ? "Other photos" : "this place", !other.length)}</div>
+      <p class="saved">${p.visits.length ? "Photos without a trip. Added here, dated photos go to their month's trip." : "Photos with a date create their trip automatically."}</p></section>`;
   }
   $("#cTrips").innerHTML = html;
   cardPhotos.forEach(async (ph) => {
@@ -380,16 +387,25 @@ $("#cTrips").addEventListener("click", async (e) => {
     if (te.dataset.armed !== "1") { te.dataset.armed = "1"; te.textContent = "Delete? Photos stay"; return; }
     p.visits = p.visits.filter((v) => v.id !== id);
   }
-  if (te.dataset.te === "save") {
+  let flash = null;
+  if (te.dataset.te === "save" || te.dataset.te === "saveadd") {
     const y = +box.querySelector('[data-te="y"]').value, m = +box.querySelector('[data-te="m"]').value;
     const clash = p.visits.find((v) => v.y === y && (v.m || 0) === m && v.id !== id);
-    if (clash) { toast(`There's already a trip in ${fmtVisit(clash)}`); return; }
-    if (id === "new") p.visits.push({ id: store.uid(), y, m });
-    else { await pinPhotosTo(p, id); const v = p.visits.find((v) => v.id === id); v.y = y; v.m = m; }
+    if (clash) { toast(`There's already a trip in ${fmtVisit(clash)} — add the photos there`); return; }
+    if (id === "new") {
+      const v = { id: store.uid(), y, m };
+      p.visits.push(v); flash = v.id;
+      if (te.dataset.te === "saveadd") { addTo = v.id; $("#cFiles").click(); }
+    } else { await pinPhotosTo(p, id); const v = p.visits.find((v) => v.id === id); v.y = y; v.m = m; flash = id; }
     sortTrips(p);
   }
   editingTrip = null;
-  await store.putPlace(p); refresh(); renderTrips();
+  await store.putPlace(p); refresh(); await renderTrips();
+  if (flash) {
+    const sec = document.querySelector(`#cTrips [data-v="${CSS.escape(flash)}"]`);
+    sec?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    sec?.classList.add("flash"); setTimeout(() => sec?.classList.remove("flash"), 1600);
+  }
 });
 $("#cFiles").addEventListener("change", async (e) => {
   const files = [...e.target.files]; e.target.value = "";
@@ -576,7 +592,8 @@ async function attachGroup(g, placeId, toTrip = null) {
   await store.putPlace(p);
   refresh();
   if (state.current === placeId) await renderTrips();
-  toast(done ? `${plural(done, "photo")} added to ${p.name}` : "No photos could be saved", 3000);
+  const trip = toTrip && p.visits.find((v) => v.id === toTrip);
+  toast(done ? `${plural(done, "photo")} added to ${trip ? fmtVisit(trip) : p.name}` : "No photos could be saved", 3000);
 }
 
 // "Choose on map" for photos without GPS: next map click / pin click / search result decides
