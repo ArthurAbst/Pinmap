@@ -31,6 +31,7 @@
 
   <aside id="list" class="panel left" hidden aria-label="My places">
     <div class="panel-head"><h2>My places</h2><button class="x" data-close="list" aria-label="Close">×</button></div>
+    <div id="acct" class="acct" hidden></div>
     <div class="stats" id="stats"></div>
     <div class="chips" id="filter"></div>
     <div id="places" class="places"></div>
@@ -109,6 +110,18 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <p class="credit">Map: Natural Earth · Places: GeoNames (CC BY 4.0) · Online search © OpenStreetMap contributors</p>
 
+  <div id="auth" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <form id="authForm" class="modal-card" novalidate>
+      <div class="panel-head"><h2 id="authTitle">Sign in</h2><button type="button" class="x" data-close="auth" aria-label="Close">×</button></div>
+      <p class="meta">One account — the same map on your phone and computer.</p>
+      <label class="lbl">Email<input id="aEmail" type="email" autocomplete="email" inputmode="email" required></label>
+      <label class="lbl">Password<input id="aPass" type="password" autocomplete="current-password" minlength="6" required></label>
+      <p id="aMsg" class="amsg" hidden></p>
+      <button id="aSubmit" class="btn primary" type="submit">Sign in</button>
+      <button id="aSwitch" class="linkbtn" type="button">No account yet? Create one</button>
+    </form>
+  </div>
+
   <div id="lightbox" class="lightbox" hidden>
     <div id="lbTrack" class="lb-track"></div>
     <button id="lbPrev" class="lb-nav prev" aria-label="Previous photo">‹</button>
@@ -119,6 +132,7 @@
 <script src="vendor/d3.min.js"></script>
 <script src="vendor/topojson-client.min.js"></script>
 <script src="vendor/exifr.lite.umd.js"></script>
+<script src="vendor/supabase.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

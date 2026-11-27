@@ -3,6 +3,8 @@
 import { createMap } from "./map.js";
 import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js";
 import * as store from "./store.js";
+import * as sync from "./sync.js";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -31,6 +33,10 @@ let map, search;
   ]);
   if (!persistent) toast("Storage is unavailable here — your pins will be lost when the page reloads.", 6000);
   for (const p of await store.allPlaces()) state.places.set(p.id, p);
+  sync.on("status", renderAccount);
+  sync.on("data", reloadFromStore);
+  await sync.init({ url: SUPABASE_URL, key: SUPABASE_KEY, fake: new URLSearchParams(location.search).has("fake") });
+  renderAccount(sync.getStatus());
 
   map = createMap($("#map"), { world50, labels, initialView });
   window.__map = map;   // handy for debugging in the console
@@ -51,6 +57,30 @@ function loadDetail() {
   if (loadDetail.started) return;
   loadDetail.started = true; map.markDetailLoading();
   fetch("data/world10.json").then((r) => r.json()).then((w) => map.setDetail(w)).catch(() => {});
+}
+
+// another device changed something: reload the local copy and redraw what's open
+let reloading = false;
+async function reloadFromStore() {
+  if (reloading || !map) return;
+  reloading = true;
+  try {
+    const fresh = await store.allPlaces();
+    state.places.clear();
+    for (const p of fresh) state.places.set(p.id, migrate(p));
+    refresh();
+    if (state.current) {
+      if (!state.places.has(state.current)) closeCard();
+      else {
+        const p = state.places.get(state.current);
+        if (document.activeElement !== $("#cName")) $("#cName").value = p.name;
+        if (document.activeElement !== $("#cNotes")) $("#cNotes").value = p.notes || "";
+        $("#cStatus").innerHTML = chipsHTML(p.status);
+        renderVisits(); renderPhotos();
+      }
+    }
+    if (peek.id && !state.places.has(peek.id)) hidePeek();
+  } finally { reloading = false; }
 }
 
 // start view: last view on this device, else the user's pins, else a full-screen world
@@ -273,15 +303,28 @@ $("#cDelete").addEventListener("click", async () => {
 
 // photos inside a card
 function revokePhotos() { photoURLs.forEach((u) => URL.revokeObjectURL(u)); photoURLs = []; }
-let cardPhotos = [];
+let cardPhotos = [], photoRender = 0;
+// image of a photo as an object URL; downloads it from the cloud if this device doesn't have it yet
+async function photoURL(ph, kind) {
+  const b = ph[kind] || (await sync.fetchBlob(ph, kind)) || (kind === "blob" ? ph.thumb || (await sync.fetchBlob(ph, "thumb")) : null);
+  return b ? URL.createObjectURL(b) : null;
+}
 async function renderPhotos() {
   revokePhotos();
   if (!state.current) return;
+  const token = ++photoRender;
   cardPhotos = await store.photosOf(state.current);
-  $("#cPhotos").innerHTML = cardPhotos.map((ph, i) => {
-    const u = URL.createObjectURL(ph.thumb); photoURLs.push(u);
-    return `<div class="ph"><button class="ph-open" data-i="${i}" aria-label="Open photo ${i + 1}"><img src="${u}" alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`;
-  }).join("") + `<div class="drop">${cardPhotos.length ? "Drop more photos here" : "Drop photos here or use “Add photos”"}</div>`;
+  if (token !== photoRender) return;
+  $("#cPhotos").innerHTML = cardPhotos.map((ph, i) =>
+    `<div class="ph"><button class="ph-open" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`
+  ).join("") + `<div class="drop">${cardPhotos.length ? "Drop more photos here" : "Drop photos here or use “Add photos”"}</div>`;
+  cardPhotos.forEach(async (ph, i) => {
+    const u = await photoURL(ph, "thumb");
+    if (!u) return;
+    if (token !== photoRender) return URL.revokeObjectURL(u);
+    photoURLs.push(u);
+    const img = $(`#cPhotos [data-i="${i}"] img`); if (img) img.src = u;
+  });
 }
 $("#cPhotos").addEventListener("click", async (e) => {
   const del = e.target.closest("[data-del]");
@@ -330,7 +373,7 @@ async function readPhotos(files) {
       const dt = d && (d.DateTimeOriginal || d.CreateDate || d.ModifyDate);
       if (dt instanceof Date && !isNaN(dt)) m.date = dt;
     } catch { /* no EXIF */ }
-    try { [m.thumb] = await resizeImage(file, 360, 0.8); } catch { m.broken = true; }
+    try { [m.thumb] = await resizeImage(file, 480, 0.8); } catch { m.broken = true; }
     out.push(m);
   }
   return out;
@@ -460,7 +503,7 @@ async function attachGroup(g, placeId) {
     toast(`Saving photos ${++done}/${files.length}…`, 10000);
     try {
       const [blob, w, h] = await resizeImage(f.file, 2048, 0.86);
-      const thumb = f.thumb || (await resizeImage(f.file, 360, 0.8))[0];
+      const thumb = f.thumb || (await resizeImage(f.file, 480, 0.8))[0];
       await store.putPhoto({ id: store.uid(), placeId, blob, thumb, w, h, name: f.file.name, takenAt: f.date ? +f.date : null, addedAt: Date.now() });
     } catch { done--; }
   }
@@ -508,8 +551,14 @@ addEventListener("drop", (e) => {
 let lbURLs = [];
 function openLightbox(photos, i) {
   const track = $("#lbTrack");
-  lbURLs = photos.map((p) => URL.createObjectURL(p.blob));
-  track.innerHTML = lbURLs.map((u, j) => `<figure><img src="${u}" alt="Photo ${j + 1}"></figure>`).join("");
+  lbURLs = [];
+  track.innerHTML = photos.map((p, j) => `<figure><img alt="Photo ${j + 1}"></figure>`).join("");
+  photos.forEach(async (ph, j) => {
+    const u = await photoURL(ph, "blob");
+    if (!u) return;
+    if ($("#lightbox").hidden) return URL.revokeObjectURL(u);
+    lbURLs.push(u); const img = track.children[j]?.querySelector("img"); if (img) img.src = u;
+  });
   $("#lightbox").hidden = false;
   track.children[i]?.scrollIntoView({ inline: "center", block: "nearest" });
   $("#lbClose").focus();
@@ -536,8 +585,15 @@ async function showPeek(id, pinned) {
   if (peek.id !== id) return;
   peek.urls.forEach((u) => URL.revokeObjectURL(u));
   peek.photos = photos;
-  peek.urls = photos.map((ph) => URL.createObjectURL(ph.blob));
-  $("#pkTrack").innerHTML = peek.urls.map((u, i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img src="${u}" alt=""></button>`).join("");
+  peek.urls = [];
+  $("#pkTrack").innerHTML = photos.map((_, i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button>`).join("");
+  photos.forEach(async (ph, i) => {
+    const u = await photoURL(ph, ph.blob ? "blob" : "thumb");
+    if (!u) return;
+    if (peek.id !== id) return URL.revokeObjectURL(u);
+    peek.urls.push(u);
+    const img = $(`#pkTrack [data-i="${i}"] img`); if (img) img.src = u;
+  });
   $("#pkPhotos").hidden = !photos.length;
   $("#pkEmpty").hidden = !!photos.length;
   $("#pkPrev").hidden = $("#pkNext").hidden = photos.length < 2;
@@ -644,6 +700,81 @@ $("#fileImport").addEventListener("change", async (e) => {
   } catch (err) { toast("Import failed: " + err.message, 5000); }
 });
 
+// ---------------- account & sync ----------------
+function renderAccount(st) {
+  const box = $("#acct");
+  if (!sync.available()) { box.hidden = true; return; }
+  box.hidden = false;
+  if (!st.user) {
+    box.innerHTML = `<p>Sign in to keep the same map on your phone and computer.</p><button class="btn primary" data-acct="in">Sign in or create account</button>`;
+    return;
+  }
+  const time = st.lastSync ? new Date(st.lastSync).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+  const label = { syncing: "Syncing…", error: "Sync problem — will retry", offline: "Offline — changes will sync later" }[st.state]
+    || (time ? `Synced at ${time}` : "Synced");
+  const dot = st.state === "syncing" ? "busy" : st.state === "error" || st.state === "offline" ? "err" : "ok";
+  box.innerHTML = `<div class="acct-row"><i class="dot ${dot}"></i><span>${esc(label)}</span></div>
+    <small>${esc(st.user.email || "")}</small>${st.state === "error" && st.error ? `<small class="amsg">${esc(st.error)}</small>` : ""}
+    <div class="row"><button class="btn small" data-acct="sync">Sync now</button><button class="linkbtn muted" data-acct="out">Sign out</button></div>`;
+}
+$("#acct").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-acct]"); if (!b) return;
+  if (b.dataset.acct === "in") openAuth();
+  if (b.dataset.acct === "sync") sync.syncNow();
+  if (b.dataset.acct === "out") {
+    if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Sign out and clear this device?"; setTimeout(() => { b.dataset.armed = ""; b.textContent = "Sign out"; }, 4000); return; }
+    await sync.syncNow();
+    if ((await store.dirtyPlaces()).length || (await store.dirtyPhotos()).length) {
+      toast("Some changes haven't reached the cloud yet — try again when you're online.", 5000); return;
+    }
+    await sync.signOut();
+    await store.clearAll();
+    try { localStorage.removeItem("pinmap:view"); } catch { /* ignore */ }
+    closeCard(); hidePeek();
+    state.places.clear(); refresh();
+    toast("Signed out. Your map is safe in your account.");
+  }
+});
+
+let authMode = "in";
+function openAuth(mode = "in") {
+  authMode = mode;
+  $("#authTitle").textContent = mode === "in" ? "Sign in" : "Create account";
+  $("#aSubmit").textContent = mode === "in" ? "Sign in" : "Create account";
+  $("#aSwitch").textContent = mode === "in" ? "No account yet? Create one" : "Already have an account? Sign in";
+  $("#aPass").autocomplete = mode === "in" ? "current-password" : "new-password";
+  $("#aMsg").hidden = true;
+  $("#auth").hidden = false;
+  $("#aEmail").focus();
+}
+function closeAuth() { $("#auth").hidden = true; }
+$("#aSwitch").addEventListener("click", () => openAuth(authMode === "in" ? "up" : "in"));
+$("#authForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = $("#aEmail").value.trim(), pass = $("#aPass").value;
+  const msg = (t) => { $("#aMsg").textContent = t; $("#aMsg").hidden = false; };
+  $("#aSubmit").disabled = true;
+  try {
+    if (authMode === "in") {
+      await sync.signIn(email, pass);
+      closeAuth(); toast("Signed in — syncing your map");
+    } else {
+      const r = await sync.signUp(email, pass);
+      if (r.session) { closeAuth(); toast("Account created — your map is now syncing"); }
+      else { msg(`We sent a confirmation link to ${email}. Open it, then sign in here.`); openAuthKeepMsg(); }
+    }
+  } catch (err) {
+    const m = String(err?.message || err);
+    msg(/invalid login/i.test(m) ? "Wrong email or password." : /not confirmed/i.test(m) ? "Please confirm your email first (check your inbox), then sign in."
+      : /already registered|already exists/i.test(m) ? "This email already has an account — sign in instead." : /password/i.test(m) ? "Password must be at least 6 characters." : m);
+  } finally { $("#aSubmit").disabled = false; }
+});
+function openAuthKeepMsg() {
+  authMode = "in";
+  $("#authTitle").textContent = "Sign in"; $("#aSubmit").textContent = "Sign in";
+  $("#aSwitch").textContent = "No account yet? Create one";
+}
+
 // ---------------- search ----------------
 let qTimer;
 const q = $("#q");
@@ -730,7 +861,7 @@ document.addEventListener("click", (e) => {
 // ---------------- global ----------------
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
   const w = b.dataset.close;
-  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else toggleList(false);
+  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else if (w === "auth") closeAuth(); else toggleList(false);
 }));
 $("#zIn").addEventListener("click", () => map.zoomBy(2));
 $("#zOut").addEventListener("click", () => map.zoomBy(0.5));
@@ -746,7 +877,8 @@ document.addEventListener("keydown", (e) => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
   if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); }
   if (e.key === "Escape") {
-    if (!$("#peek").hidden) hidePeek();
+    if (!$("#auth").hidden) closeAuth();
+    else if (!$("#peek").hidden) hidePeek();
     else if (!$("#pop").hidden) closePopover();
     else if (state.pick) endPick();
     else if (!$("#card").hidden) closeCard();

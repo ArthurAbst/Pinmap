@@ -1,10 +1,19 @@
-// Local storage of places and photos in IndexedDB (falls back to memory if unavailable).
-// Swap this module for a server API later (Supabase etc.) — the rest of the app only
-// uses the functions exported here.
+// Local copy of places and photos in IndexedDB (falls back to memory if unavailable).
+// The app reads and writes only here; js/sync.js mirrors changes to the cloud.
+//
+// Sync bookkeeping on every record:
+//   updatedAt  – client time of the last edit (last write wins)
+//   dirty      – changed here and not yet sent to the cloud (undefined = older record, also unsent)
+//   deleted    – tombstone, kept until the deletion reaches the cloud
+// Photos may arrive from another device without image data (blob / thumb = null);
+// sync.fetchBlob() downloads them on demand.
 
 const DB_NAME = "pinmap", DB_VER = 1;
 let dbPromise = null;
 let memory = null;   // fallback: { places: Map, photos: Map }
+const listeners = [];
+export const onChange = (fn) => listeners.push(fn);
+const changed = () => listeners.forEach((f) => f());
 
 function open() {
   if (!dbPromise) {
@@ -41,43 +50,78 @@ export async function init() {
 }
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const isDirty = (r) => r.dirty !== false;
 
-export function allPlaces() {
-  if (memory) return Promise.resolve([...memory.places.values()]);
-  return run("places", "readonly", (s) => s.getAll());
+// ---------- raw access ----------
+const getAll = (s) => (memory ? Promise.resolve([...memory[s].values()]) : run(s, "readonly", (st) => st.getAll()));
+const getOne = (s, id) => (memory ? Promise.resolve(memory[s].get(id)) : run(s, "readonly", (st) => st.get(id)));
+const putRaw = (s, r) => (memory ? (memory[s].set(r.id, r), Promise.resolve()) : run(s, "readwrite", (st) => st.put(r)));
+const delRaw = (s, id) => (memory ? (memory[s].delete(id), Promise.resolve()) : run(s, "readwrite", (st) => st.delete(id)));
+export const getPlace = (id) => getOne("places", id);
+export const getPhoto = (id) => getOne("photos", id);
+
+// ---------- places ----------
+export async function allPlaces() { return (await getAll("places")).filter((p) => !p.deleted); }
+
+/** Save a place edited here (marks it for upload). `remote` = applying a change from the cloud. */
+export async function putPlace(p, { remote = false } = {}) {
+  if (!remote) { p.updatedAt = Date.now(); p.dirty = true; }
+  await putRaw("places", p);
+  if (!remote) changed();
 }
-export function putPlace(p) {
-  p.updatedAt = Date.now();
-  if (memory) { memory.places.set(p.id, p); return Promise.resolve(); }
-  return run("places", "readwrite", (s) => s.put(p));
-}
+
 export async function deletePlace(id) {
-  const photos = await photosOf(id);
-  if (memory) { memory.places.delete(id); photos.forEach((p) => memory.photos.delete(p.id)); return; }
-  await run("photos", "readwrite", (s) => { photos.forEach((p) => s.delete(p.id)); });
-  await run("places", "readwrite", (s) => s.delete(id));
+  const p = await getPlace(id);
+  for (const ph of await photosOf(id)) await deletePhoto(ph.id, { silent: true });
+  if (p) await putRaw("places", { id, deleted: true, dirty: true, updatedAt: Date.now() });
+  changed();
 }
 
-export function photosOf(placeId) {
-  if (memory) return Promise.resolve([...memory.photos.values()].filter((p) => p.placeId === placeId));
-  return run("photos", "readonly", (s) => s.index("placeId").getAll(placeId))
-    .then((l) => l.sort((a, b) => a.addedAt - b.addedAt));
+// ---------- photos ----------
+export async function photosOf(placeId) {
+  const l = memory ? [...memory.photos.values()].filter((p) => p.placeId === placeId)
+    : await run("photos", "readonly", (s) => s.index("placeId").getAll(placeId));
+  return l.filter((p) => !p.deleted).sort((a, b) => (a.takenAt || a.addedAt) - (b.takenAt || b.addedAt));
 }
-export function putPhoto(p) {
-  if (memory) { memory.photos.set(p.id, p); return Promise.resolve(); }
-  return run("photos", "readwrite", (s) => s.put(p));
+export async function putPhoto(ph, { remote = false } = {}) {
+  if (!remote) { ph.updatedAt = Date.now(); ph.dirty = true; }
+  await putRaw("photos", ph);
+  if (!remote) changed();
 }
-export function deletePhoto(id) {
-  if (memory) { memory.photos.delete(id); return Promise.resolve(); }
-  return run("photos", "readwrite", (s) => s.delete(id));
+/** Store downloaded image data without marking the photo as edited. */
+export async function putPhotoBlob(id, kind, blob) {
+  const ph = await getPhoto(id); if (!ph) return;
+  ph[kind] = blob;
+  await putRaw("photos", ph);
 }
-export function countPhotos() {
-  if (memory) return Promise.resolve(memory.photos.size);
-  return run("photos", "readonly", (s) => s.count());
+export async function deletePhoto(id, { silent = false } = {}) {
+  const ph = await getPhoto(id); if (!ph) return;
+  await putRaw("photos", { id, placeId: ph.placeId, uploaded: ph.uploaded, deleted: true, dirty: true, updatedAt: Date.now() });
+  if (!silent) changed();
 }
-function allPhotos() {
-  if (memory) return Promise.resolve([...memory.photos.values()]);
-  return run("photos", "readonly", (s) => s.getAll());
+export async function countPhotos() { return (await getAll("photos")).filter((p) => !p.deleted).length; }
+
+// ---------- for sync ----------
+export async function dirtyPlaces() { return (await getAll("places")).filter(isDirty); }
+export async function dirtyPhotos() { return (await getAll("photos")).filter(isDirty); }
+export async function photosMissing(kind) { return (await getAll("photos")).filter((p) => !p.deleted && !p[kind]); }
+/** After an upload: clear `dirty` unless the record was edited again meanwhile. */
+export async function markClean(s, id, updatedAt, extra = {}) {
+  const r = await getOne(s, id); if (!r || r.updatedAt !== updatedAt) return;
+  Object.assign(r, extra, { dirty: false });
+  await putRaw(s, r);
+}
+export const purge = (s, id) => delRaw(s, id);
+export async function purgePlaceAndPhotos(id) {
+  for (const ph of (await getAll("photos")).filter((p) => p.placeId === id)) await delRaw("photos", ph.id);
+  await delRaw("places", id);
+}
+
+/** Remove everything from this device (used on sign-out; the cloud copy stays). */
+export async function clearAll() {
+  if (memory) { memory.places.clear(); memory.photos.clear(); return; }
+  await run("places", "readwrite", (s) => s.clear());
+  await run("photos", "readwrite", (s) => s.clear());
 }
 
 // ---------- backup ----------
@@ -91,21 +135,26 @@ function fromDataURL(u) {
   for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
   return new Blob([a], { type: mime });
 }
+const SYNC_FIELDS = ["dirty", "uploaded", "deleted"];
+const strip = (r) => { const o = { ...r }; SYNC_FIELDS.forEach((k) => delete o[k]); return o; };
 
+/** Backup of everything stored on this device (photos not yet downloaded are listed in `missing`). */
 export async function exportAll() {
-  const places = await allPlaces();
-  const photos = [];
-  for (const p of await allPhotos()) {
-    photos.push({ ...p, blob: await toDataURL(p.blob), thumb: await toDataURL(p.thumb) });
+  const places = (await allPlaces()).map(strip);
+  const photos = [], missing = [];
+  for (const p of await getAll("photos")) {
+    if (p.deleted) continue;
+    if (!p.blob || !p.thumb) { missing.push(p.id); continue; }
+    photos.push({ ...strip(p), blob: await toDataURL(p.blob), thumb: await toDataURL(p.thumb) });
   }
-  return { app: "pinmap", version: 1, exportedAt: new Date().toISOString(), places, photos };
+  return { app: "pinmap", version: 2, exportedAt: new Date().toISOString(), places, photos, missing };
 }
 
 export async function importAll(data) {
   if (!data || data.app !== "pinmap" || !Array.isArray(data.places)) throw new Error("Not a Pinmap backup file");
-  for (const p of data.places) await putPlace(p);
+  for (const p of data.places) await putPlace({ ...p });
   for (const ph of data.photos || []) {
-    await putPhoto({ ...ph, blob: await fromDataURL(ph.blob), thumb: await fromDataURL(ph.thumb) });
+    await putPhoto({ ...ph, blob: fromDataURL(ph.blob), thumb: fromDataURL(ph.thumb) });
   }
   return data.places.length;
 }
