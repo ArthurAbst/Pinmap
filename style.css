@@ -265,3 +265,21 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .place.hist span small{color:var(--ink-soft);font-size:13px}
 .stats-tab{margin-top:4px}
 .near i{background:var(--pin-visited)}
+
+/* trips in the place card */
+.trips{display:flex;flex-direction:column;gap:14px}
+.trip{display:flex;flex-direction:column;gap:8px;border-radius:12px}
+.trip.dragover{outline:2px dashed var(--coast);outline-offset:4px}
+.trip-head{display:flex;align-items:center;gap:8px;min-height:40px}
+.trip-when{border:0;background:none;padding:6px 0;font:600 17px/1.2 "Barlow Semi Condensed",var(--ui);cursor:pointer;display:inline-flex;align-items:center;gap:6px;color:inherit}
+.trip-when .pen{font-size:13px;color:var(--ink-soft);border:1px solid var(--line);border-radius:50%;width:24px;height:24px;display:grid;place-items:center}
+.trip-other{font:600 17px/1.2 "Barlow Semi Condensed",var(--ui)}
+.trip-n{flex:1;font-size:13px;color:var(--ink-soft)}
+.trip-edit{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:light-dark(#f3f6f8,#182a37);border-radius:12px;padding:10px}
+.trip-edit select{flex:1;min-width:120px}
+.trip-edit .row{display:flex;gap:8px;align-items:center;width:100%}
+.btn.small.primary{background:var(--accent);color:#fff}
+.danger-l{color:var(--accent)!important;margin-left:auto}
+.lb-bar{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);background:rgba(20,28,36,.82);color:#fff;border-radius:12px;padding:8px 12px;font-size:15px}
+.lb-bar[hidden]{display:none}
+.lb-bar select{margin-left:8px;height:38px;background:#fff;color:#16212b;border-radius:8px}

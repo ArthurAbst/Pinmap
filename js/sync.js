@@ -95,7 +95,7 @@ const placeData = (p) => {
   for (const k of ["dirty", "deleted", "updatedAt"]) delete d[k];
   return d;
 };
-const photoData = (ph) => ({ w: ph.w, h: ph.h, name: ph.name, takenAt: ph.takenAt ?? null, addedAt: ph.addedAt });
+const photoData = (ph) => ({ w: ph.w, h: ph.h, name: ph.name, takenAt: ph.takenAt ?? null, addedAt: ph.addedAt, visitId: ph.visitId ?? null });
 const filePath = (id, kind) => `${user.id}/${id}${kind === "thumb" ? "_t" : ""}.jpg`;
 
 async function push() {

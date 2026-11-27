@@ -78,7 +78,7 @@ async function reloadFromStore() {
         const p = state.places.get(state.current);
         if (document.activeElement !== $("#cName")) $("#cName").value = p.name;
         if (document.activeElement !== $("#cNotes")) $("#cNotes").value = p.notes || "";
-        renderVisits(); renderPhotos();
+        if (!editingTrip) renderTrips();
       }
     }
     if (peek.id && !state.places.has(peek.id)) hidePeek();
@@ -118,12 +118,27 @@ function migrate(p) {
     if (p.from) p.visits.push({ y: +p.from.slice(0, 4), m: +p.from.slice(5, 7) || 0 });
     delete p.from; delete p.to;
   }
+  for (const v of p.visits) v.id ||= "t" + v.y + "-" + (v.m || 0);   // trips get a stable id
   return p;
 }
+const sortTrips = (p) => p.visits.sort((a, b) => b.y - a.y || b.m - a.m);
+/** The trip for a month (creating it if needed). */
 function addVisit(p, v) {
-  if (!v.y || p.visits.some((x) => x.y === v.y && x.m === v.m)) return;
-  p.visits.push(v);
-  p.visits.sort((a, b) => b.y - a.y || b.m - a.m);
+  if (!v.y) return null;
+  let t = p.visits.find((x) => x.y === v.y && (x.m || 0) === (v.m || 0));
+  if (!t) { t = { id: store.uid(), y: v.y, m: v.m || 0 }; p.visits.push(t); sortTrips(p); }
+  return t;
+}
+/** Which trip a photo belongs to: chosen by hand, else by the month it was taken. */
+function tripOf(p, ph) {
+  if (ph.visitId === "none") return null;
+  if (ph.visitId && p.visits.some((v) => v.id === ph.visitId)) return ph.visitId;
+  if (ph.takenAt) {
+    const d = new Date(ph.takenAt), y = d.getFullYear(), m = d.getMonth() + 1;
+    const v = p.visits.find((v) => v.y === y && v.m === m) || p.visits.find((v) => v.y === y && !v.m);
+    if (v) return v.id;
+  }
+  return null;
 }
 
 function refresh() {
@@ -258,10 +273,10 @@ async function openCard(id) {
   $("#cMeta").textContent = [p.kind ? kindLabel(p.kind) : "", p.country, fmtLL(p.lon, p.lat)].filter(Boolean).join(" · ");
   $("#cNotes").value = p.notes || "";
   $("#cSaved").textContent = p.updatedAt ? "Saved " + new Date(p.updatedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
-  renderVisits();
+  editingTrip = null;
   resetDelete();
   $("#card").hidden = false;
-  await renderPhotos();
+  await renderTrips();
 }
 function closeCard() { $("#card").hidden = true; state.current = null; revokePhotos(); }
 
@@ -274,32 +289,6 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => { await store.putPlace(p); $("#cSaved").textContent = "Saved"; refresh(); }, 400);
 }
 ["#cName", "#cNotes"].forEach((s) => $(s).addEventListener("input", scheduleSave));
-// visits ("June 2026")
-(function fillVisitSelects() {
-  const now = new Date();
-  $("#vMonth").innerHTML = `<option value="0">Month (optional)</option>` + MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join("");
-  $("#vMonth").value = String(now.getMonth() + 1);
-  let y = "";
-  for (let i = now.getFullYear(); i >= 1950; i--) y += `<option>${i}</option>`;
-  $("#vYear").innerHTML = y;
-})();
-function renderVisits() {
-  const p = state.places.get(state.current); if (!p) return;
-  $("#cVisits").innerHTML = p.visits.length
-    ? p.visits.map((v, i) => `<span class="vchip">${esc(fmtVisit(v))}<button data-rm="${i}" aria-label="Remove ${esc(fmtVisit(v))}">×</button></span>`).join("")
-    : `<span class="saved">No date yet — photos with a date fill this in automatically.</span>`;
-}
-$("#vAdd").addEventListener("click", async () => {
-  const p = state.places.get(state.current); if (!p) return;
-  addVisit(p, { y: +$("#vYear").value, m: +$("#vMonth").value });
-  renderVisits(); await store.putPlace(p); refresh();
-});
-$("#cVisits").addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-rm]"); const p = state.places.get(state.current); if (!b || !p) return;
-  p.visits.splice(+b.dataset.rm, 1);
-  renderVisits(); await store.putPlace(p); refresh();
-});
-
 function resetDelete() { const b = $("#cDelete"); b.textContent = "Delete place"; b.dataset.armed = ""; }
 $("#cDelete").addEventListener("click", async () => {
   const b = $("#cDelete");
@@ -309,52 +298,117 @@ $("#cDelete").addEventListener("click", async () => {
   closeCard(); refresh(); toast("Place deleted");
 });
 
-// photos inside a card
+// ---------------- trips & photos in the place card ----------------
+// A trip is a month + year. Photos sit under their trip (by hand or by the month they were taken);
+// the rest are under "Other photos".
 function revokePhotos() { photoURLs.forEach((u) => URL.revokeObjectURL(u)); photoURLs = []; }
-let cardPhotos = [], photoRender = 0;
+let cardPhotos = [], photoRender = 0, editingTrip = null, addTo = null;
 // image of a photo as an object URL; downloads it from the cloud if this device doesn't have it yet
 async function photoURL(ph, kind) {
   const b = ph[kind] || (await sync.fetchBlob(ph, kind)) || (kind === "blob" ? ph.thumb || (await sync.fetchBlob(ph, "thumb")) : null);
   return b ? URL.createObjectURL(b) : null;
 }
-async function renderPhotos() {
+const monthOptions = (sel) => `<option value="0"${!sel ? " selected" : ""}>Month</option>` + MONTHS.map((m, i) => `<option value="${i + 1}"${sel === i + 1 ? " selected" : ""}>${m}</option>`).join("");
+const yearOptions = (sel) => { let o = ""; for (let y = new Date().getFullYear(); y >= 1950; y--) o += `<option${y === sel ? " selected" : ""}>${y}</option>`; return o; };
+function tripEditor(v) {
+  const now = new Date();
+  return `<div class="trip-edit" data-editing="${v ? esc(v.id) : "new"}">
+    <select data-te="m" aria-label="Month">${monthOptions(v ? v.m : now.getMonth() + 1)}</select>
+    <select data-te="y" aria-label="Year">${yearOptions(v ? v.y : now.getFullYear())}</select>
+    <div class="row"><button class="btn small primary" data-te="save">Save</button><button class="linkbtn muted" data-te="cancel">Cancel</button>
+    ${v ? `<button class="linkbtn danger-l" data-te="del">Delete trip</button>` : ""}</div></div>`;
+}
+const tileHTML = (ph) => `<div class="ph"><button class="ph-open" data-ph="${esc(ph.id)}" aria-label="Open photo"><img alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`;
+
+async function renderTrips() {
   revokePhotos();
-  if (!state.current) return;
+  const p = state.places.get(state.current); if (!p) return;
   const token = ++photoRender;
-  cardPhotos = await store.photosOf(state.current);
+  cardPhotos = await store.photosOf(p.id);
   if (token !== photoRender) return;
-  $("#cPhotos").innerHTML = cardPhotos.map((ph, i) =>
-    `<div class="ph"><button class="ph-open" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`
-  ).join("") + `<div class="drop">${cardPhotos.length ? "Drop more photos here" : "Drop photos here or use “Add photos”"}</div>`;
-  cardPhotos.forEach(async (ph, i) => {
+  const by = new Map([[null, []], ...p.visits.map((v) => [v.id, []])]);
+  for (const ph of cardPhotos) by.get(tripOf(p, ph))?.push(ph) ?? by.get(null).push(ph);
+  let html = editingTrip === "new" ? `<section class="trip">${tripEditor(null)}</section>` : "";
+  for (const v of p.visits) {
+    const list = by.get(v.id);
+    html += `<section class="trip" data-v="${esc(v.id)}">` + (editingTrip === v.id ? tripEditor(v)
+      : `<div class="trip-head"><button class="trip-when" data-edit="${esc(v.id)}" aria-label="Change the month of this trip">${esc(fmtVisit(v))}<span class="pen" aria-hidden="true">✎</span></button>
+         <span class="trip-n">${list.length ? plural(list.length, "photo") : ""}</span>
+         <button class="btn small" data-addto="${esc(v.id)}">Add photos</button></div>`)
+      + `<div class="photos">${list.map(tileHTML).join("")}</div></section>`;
+  }
+  const other = by.get(null);
+  if (other.length || !p.visits.length) {
+    html += `<section class="trip" data-v=""><div class="trip-head"><b class="trip-other">${p.visits.length ? "Other photos" : "Photos"}</b>
+      <span class="trip-n">${other.length ? plural(other.length, "photo") : ""}</span><button class="btn small" data-addto="">Add photos</button></div>
+      <div class="photos">${other.map(tileHTML).join("")}</div>
+      ${!other.length && !p.visits.length ? `<p class="saved">Photos with a date create their trip automatically.</p>` : ""}</section>`;
+  }
+  $("#cTrips").innerHTML = html;
+  cardPhotos.forEach(async (ph) => {
     const u = await photoURL(ph, "thumb");
     if (!u) return;
     if (token !== photoRender) return URL.revokeObjectURL(u);
     photoURLs.push(u);
-    const img = $(`#cPhotos [data-i="${i}"] img`); if (img) img.src = u;
+    const img = document.querySelector(`#cTrips [data-ph="${CSS.escape(ph.id)}"] img`); if (img) img.src = u;
   });
 }
-$("#cPhotos").addEventListener("click", async (e) => {
-  const del = e.target.closest("[data-del]");
-  if (del) { await store.deletePhoto(del.dataset.del); await renderPhotos(); return; }
-  const ph = e.target.closest("[data-i]");
-  if (ph) openLightbox(cardPhotos, +ph.dataset.i);
+// keep photos with their trip when its month changes: pin the ones matched by date
+async function pinPhotosTo(p, tripId) {
+  for (const ph of cardPhotos) if (tripOf(p, ph) === tripId && ph.visitId !== tripId) { ph.visitId = tripId; await store.putPhoto(ph); }
+}
+$("#tripNew").addEventListener("click", () => { editingTrip = "new"; renderTrips(); });
+$("#cTrips").addEventListener("click", async (e) => {
+  const p = state.places.get(state.current); if (!p) return;
+  const t = e.target;
+  const del = t.closest("[data-del]");
+  if (del) { await store.deletePhoto(del.dataset.del); return renderTrips(); }
+  const open = t.closest("[data-ph]");
+  if (open) {
+    const sec = open.closest("[data-v]");
+    const list = cardPhotos.filter((ph) => (tripOf(p, ph) || "") === (sec?.dataset.v ?? ""));
+    return openLightbox(list, list.findIndex((ph) => ph.id === open.dataset.ph), p.id);
+  }
+  const ed = t.closest("[data-edit]");
+  if (ed) { editingTrip = ed.dataset.edit; return renderTrips(); }
+  const add = t.closest("[data-addto]");
+  if (add) { addTo = add.dataset.addto || null; return $("#cFiles").click(); }
+  const te = t.closest("[data-te]"); if (!te || te.tagName === "SELECT") return;
+  const box = te.closest(".trip-edit"), id = box.dataset.editing;
+  if (te.dataset.te === "cancel") { editingTrip = null; return renderTrips(); }
+  if (te.dataset.te === "del") {
+    if (te.dataset.armed !== "1") { te.dataset.armed = "1"; te.textContent = "Delete? Photos stay"; return; }
+    p.visits = p.visits.filter((v) => v.id !== id);
+  }
+  if (te.dataset.te === "save") {
+    const y = +box.querySelector('[data-te="y"]').value, m = +box.querySelector('[data-te="m"]').value;
+    const clash = p.visits.find((v) => v.y === y && (v.m || 0) === m && v.id !== id);
+    if (clash) { toast(`There's already a trip in ${fmtVisit(clash)}`); return; }
+    if (id === "new") p.visits.push({ id: store.uid(), y, m });
+    else { await pinPhotosTo(p, id); const v = p.visits.find((v) => v.id === id); v.y = y; v.m = m; }
+    sortTrips(p);
+  }
+  editingTrip = null;
+  await store.putPlace(p); refresh(); renderTrips();
 });
 $("#cFiles").addEventListener("change", async (e) => {
   const files = [...e.target.files]; e.target.value = "";
   if (!state.current || !files.length) return;
   const metas = await readPhotos(files);
-  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current);
+  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current, addTo);
+  addTo = null;
 });
-const cardDrop = $("#cPhotos");
-cardDrop.addEventListener("dragover", (e) => { e.preventDefault(); cardDrop.classList.add("dragover"); });
-cardDrop.addEventListener("dragleave", () => cardDrop.classList.remove("dragover"));
+// drop photos on a trip → that trip; anywhere else in the card → by date
+const cardDrop = $("#cTrips");
+cardDrop.addEventListener("dragover", (e) => { e.preventDefault(); e.target.closest(".trip")?.classList.add("dragover"); });
+cardDrop.addEventListener("dragleave", (e) => e.target.closest(".trip")?.classList.remove("dragover"));
 cardDrop.addEventListener("drop", async (e) => {
-  e.preventDefault(); cardDrop.classList.remove("dragover");
+  e.preventDefault();
+  const sec = e.target.closest("[data-v]"); sec?.classList.remove("dragover");
   const files = [...e.dataTransfer.files].filter(isImage);
   if (!state.current || !files.length) return;
   const metas = await readPhotos(files);
-  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current);
+  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current, sec?.dataset.v || null);
 });
 
 async function resizeImage(file, max, q) {
@@ -504,7 +558,9 @@ $("#groups").addEventListener("change", async (e) => {
 });
 
 // save a group's photos into a place; dates from the photos become visits
-async function attachGroup(g, placeId) {
+// toTrip: put every photo into this trip; otherwise each photo goes to the trip of the month
+// it was taken in (created if needed), and undated photos stay without a trip.
+async function attachGroup(g, placeId, toTrip = null) {
   const p = state.places.get(placeId); if (!p) return;
   const files = g.files.filter((f) => !f.broken);
   let done = 0;
@@ -513,14 +569,13 @@ async function attachGroup(g, placeId) {
     try {
       const [blob, w, h] = await resizeImage(f.file, 2048, 0.86);
       const thumb = f.thumb || (await resizeImage(f.file, 480, 0.8))[0];
-      await store.putPhoto({ id: store.uid(), placeId, blob, thumb, w, h, name: f.file.name, takenAt: f.date ? +f.date : null, addedAt: Date.now() });
+      const visitId = toTrip || (f.date ? addVisit(p, { y: f.date.getFullYear(), m: f.date.getMonth() + 1 }).id : null);
+      await store.putPhoto({ id: store.uid(), placeId, blob, thumb, w, h, name: f.file.name, takenAt: f.date ? +f.date : null, addedAt: Date.now(), visitId });
     } catch { done--; }
   }
-  if (p.status === "wish" && g.visits?.length) p.status = "visited";
-  for (const v of g.visits || []) addVisit(p, v);
   await store.putPlace(p);
   refresh();
-  if (state.current === placeId) { renderVisits(); await renderPhotos(); }
+  if (state.current === placeId) await renderTrips();
   toast(done ? `${plural(done, "photo")} added to ${p.name}` : "No photos could be saved", 3000);
 }
 
@@ -598,8 +653,13 @@ const stepTrack = (track, d) => track.scrollBy({ left: d * track.clientWidth, be
 
 // lightbox
 let lbURLs = [];
-function openLightbox(photos, i) {
+let lb = { photos: [], idx: 0, placeId: null };
+function openLightbox(photos, i, placeId = null) {
   const track = $("#lbTrack");
+  lb = { photos, idx: i, placeId };
+  const p = placeId && state.places.get(placeId);
+  $("#lbBar").hidden = !p;
+  if (p) $("#lbTrip").innerHTML = p.visits.map((v) => `<option value="${esc(v.id)}">${esc(fmtVisit(v))}</option>`).join("") + `<option value="none">No trip</option>`;
   lbURLs = [];
   track.innerHTML = loopOrder(photos.length).map((j) => `<figure data-i="${j}"><img alt="Photo ${j + 1}"></figure>`).join("");
   photos.forEach(async (ph, j) => {
@@ -611,9 +671,20 @@ function openLightbox(photos, i) {
   });
   $("#lightbox").hidden = false;
   $("#lbPrev").hidden = $("#lbNext").hidden = photos.length < 2;
-  loopTrack(track, photos.length, i);
+  loopTrack(track, photos.length, i, (k) => { lb.idx = k; syncLbTrip(); });
   $("#lbClose").focus();
 }
+function syncLbTrip() {
+  const p = lb.placeId && state.places.get(lb.placeId), ph = lb.photos[lb.idx];
+  if (p && ph) $("#lbTrip").value = tripOf(p, ph) || "none";
+}
+$("#lbTrip").addEventListener("change", async () => {
+  const ph = lb.photos[lb.idx]; if (!ph) return;
+  ph.visitId = $("#lbTrip").value;
+  await store.putPhoto(ph);
+  toast($("#lbTrip").value === "none" ? "Photo moved to Other photos" : `Photo moved to ${$("#lbTrip").selectedOptions[0].text}`);
+  if (state.current === lb.placeId) renderTrips();
+});
 function closeLightbox() { $("#lightbox").hidden = true; $("#lbTrack")._off?.(); $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
 function lbStep(d) { stepTrack($("#lbTrack"), d); }
 $("#lbPrev").addEventListener("click", () => lbStep(-1));

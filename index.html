@@ -51,19 +51,10 @@
       <button class="x" data-close="card" aria-label="Close">×</button>
     </div>
     <p id="cMeta" class="meta"></p>
-    <div class="visits" id="cVisitsBox">
-      <span class="lbl">When</span>
-      <div id="cVisits" class="chips"></div>
-      <div class="visit-add">
-        <select id="vMonth" aria-label="Month"></select>
-        <select id="vYear" aria-label="Year"></select>
-        <button id="vAdd" class="btn small">Add</button>
-      </div>
-    </div>
+    <div class="photos-head"><span class="lbl">Trips &amp; photos</span><button type="button" class="btn small" id="tripNew">+ Trip</button></div>
+    <div id="cTrips" class="trips"></div>
     <label class="lbl" for="cNotes">Notes</label>
     <textarea id="cNotes" rows="6" placeholder="What happened here, what to remember, whom you were with…"></textarea>
-    <div class="photos-head"><span class="lbl">Photos</span><button type="button" class="btn small" data-file="cFiles">Add photos</button></div>
-    <div id="cPhotos" class="photos"></div>
     <div class="card-foot"><span id="cSaved" class="saved"></span><button id="cDelete" class="btn danger">Delete place</button></div>
   </aside>
 
@@ -132,6 +123,7 @@
     <button id="lbPrev" class="lb-nav prev" aria-label="Previous photo">‹</button>
     <button id="lbNext" class="lb-nav next" aria-label="Next photo">›</button>
     <button id="lbClose" class="lb-close" aria-label="Close">×</button>
+    <div id="lbBar" class="lb-bar" hidden><label>Trip <select id="lbTrip"></select></label></div>
   </div>
 </div>
 <script src="vendor/d3.min.js"></script>
