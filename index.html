@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinmap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@400;500;600&family=Barlow:wght@400;500;600&family=Spectral:ital,wght@1,400;1,500&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22%3E%3Ccircle cx=%2212%22 cy=%228%22 r=%226%22 fill=%22%23d8312b%22/%3E%3Cpath d=%22M12 14v9%22 stroke=%22%23555%22 stroke-width=%222%22/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="file-inputs" aria-hidden="true">
+  <input id="importFiles" type="file" accept="image/*" multiple tabindex="-1">
+  <input id="cFiles" type="file" accept="image/*" multiple tabindex="-1">
+  <input id="fileImport" type="file" accept=".json,application/json" tabindex="-1">
+</div>
+<div id="app">
+  <canvas id="map" aria-label="World map. Click to place a pin."></canvas>
+
+  <header class="bar">
+    <div class="brand"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="6" fill="var(--pin-visited)"/><path d="M12 14v9" stroke="currentColor" stroke-width="1.6"/></svg>Pinmap</div>
+    <div class="search">
+      <input id="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search a city, mountain, lake…" aria-label="Search places">
+      <div id="results" class="results" role="listbox" hidden></div>
+    </div>
+    <button type="button" class="btn ghost" id="btnPhotos" data-file="importFiles" title="Add photos — we'll find where they were taken"><svg viewBox="0 0 24 24" aria-hidden="true" width="20" height="20"><path d="M4 7h3l2-2.5h6L17 7h3v12H4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/></svg><span class="lbl-wide">Add photos</span></button>
+    <button id="btnList" class="btn ghost" aria-expanded="false" aria-controls="list">My places <span id="count" class="count">0</span></button>
+  </header>
+
+  <aside id="list" class="panel left" hidden aria-label="My places">
+    <div class="panel-head"><h2>My places</h2><button class="x" data-close="list" aria-label="Close">×</button></div>
+    <div class="stats" id="stats"></div>
+    <div class="chips" id="filter"></div>
+    <div id="places" class="places"></div>
+    <div class="panel-foot">
+      <button id="btnExport" class="btn ghost">Export backup</button>
+      <button type="button" class="btn ghost" data-file="fileImport">Import</button>
+    </div>
+  </aside>
+
+  <aside id="card" class="panel right" hidden aria-label="Place">
+    <div class="panel-head">
+      <input id="cName" class="title-in" aria-label="Place name">
+      <button class="x" data-close="card" aria-label="Close">×</button>
+    </div>
+    <p id="cMeta" class="meta"></p>
+    <div class="chips" id="cStatus"></div>
+    <div class="visits" id="cVisitsBox">
+      <span class="lbl">When</span>
+      <div id="cVisits" class="chips"></div>
+      <div class="visit-add">
+        <select id="vMonth" aria-label="Month"></select>
+        <select id="vYear" aria-label="Year"></select>
+        <button id="vAdd" class="btn small">Add</button>
+      </div>
+    </div>
+    <label class="lbl" for="cNotes">Notes</label>
+    <textarea id="cNotes" rows="6" placeholder="What happened here, what to remember, whom you were with…"></textarea>
+    <div class="photos-head"><span class="lbl">Photos</span><button type="button" class="btn small" data-file="cFiles">Add photos</button></div>
+    <div id="cPhotos" class="photos"></div>
+    <div class="card-foot"><span id="cSaved" class="saved"></span><button id="cDelete" class="btn danger">Delete place</button></div>
+  </aside>
+
+  <aside id="import" class="panel left" hidden aria-label="Place your photos">
+    <div class="panel-head"><h2>Place your photos</h2><button class="x" data-close="import" aria-label="Close">×</button></div>
+    <p class="meta" id="importNote"></p>
+    <div id="groups" class="groups"></div>
+  </aside>
+
+  <div id="pickBar" class="pickbar" hidden>
+    <span id="pickText"></span>
+    <button id="pickCancel" class="btn small">Cancel</button>
+  </div>
+
+  <div id="dropzone" class="dropzone" hidden><div>Drop photos — we'll put them on the map</div></div>
+
+  <div id="pop" class="pop" hidden>
+    <input id="pName" aria-label="Name of the new place">
+    <p id="pMeta" class="meta"></p>
+    <div class="chips" id="pStatus"></div>
+    <div class="row"><button id="pCancel" class="btn ghost">Cancel</button><button id="pAdd" class="btn primary">Stick a pin</button></div>
+  </div>
+
+  <div class="zoomctl">
+    <button id="zIn" aria-label="Zoom in">+</button>
+    <button id="zOut" aria-label="Zoom out">−</button>
+    <button id="zHome" aria-label="Whole world">⌂</button>
+  </div>
+
+  <div id="hint" class="hint" hidden>Click anywhere on the map to stick a pin, or search for a place above.</div>
+  <div id="tip" class="tip" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <p class="credit">Map: Natural Earth · Places: GeoNames (CC BY 4.0) · Online search © OpenStreetMap contributors</p>
+
+  <div id="lightbox" class="lightbox" hidden>
+    <div id="lbTrack" class="lb-track"></div>
+    <button id="lbPrev" class="lb-nav prev" aria-label="Previous photo">‹</button>
+    <button id="lbNext" class="lb-nav next" aria-label="Next photo">›</button>
+    <button id="lbClose" class="lb-close" aria-label="Close">×</button>
+  </div>
+</div>
+<script src="vendor/d3.min.js"></script>
+<script src="vendor/topojson-client.min.js"></script>
+<script src="vendor/exifr.lite.umd.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

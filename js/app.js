@@ -1,0 +1,664 @@
+// Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
+/* global exifr */
+import { createMap } from "./map.js";
+import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js";
+import * as store from "./store.js";
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+const STATUS = [
+  { id: "visited", label: "Visited", color: "var(--pin-visited)" },
+  { id: "lived", label: "Lived", color: "var(--pin-lived)" },
+  { id: "wish", label: "Want to go", color: "var(--pin-wish)" },
+  { id: "label", label: "Label only", color: "var(--pin-label)" },
+];
+const statusOf = (id) => STATUS.find((s) => s.id === id) || STATUS[0];
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const fmtVisit = (v) => (v.m ? MONTHS[v.m - 1] + " " : "") + v.y;
+const fmtVisitShort = (v) => (v.m ? MONTHS[v.m - 1].slice(0, 3) + " " : "") + v.y;
+
+const state = { places: new Map(), current: null, draft: null, filter: "all", results: [], sel: -1, pick: null };
+const imp = { groups: [], urls: [] };
+let map, search;
+
+// ---------------- boot ----------------
+(async function boot() {
+  const [world50, labels, persistent] = await Promise.all([
+    fetch("data/world50.json").then((r) => r.json()),
+    fetch("data/labels.json").then((r) => r.json()),
+    store.init(),
+  ]);
+  map = createMap($("#map"), { world50, labels });
+  window.__map = map;   // handy for debugging in the console
+  search = createSearch(labels);
+  if (!persistent) toast("Storage is unavailable here — your pins will be lost when the page reloads.", 6000);
+
+  for (const p of await store.allPlaces()) state.places.set(p.id, migrate(p));
+  refresh();
+
+  map.on("mapclick", onMapClick);
+  map.on("pin", onPinClick);
+  map.on("hover", onHover);
+  map.on("move", positionPopover);
+  map.on("needDetail", loadDetail);
+  setTimeout(loadDetail, 2500);
+})().catch((e) => { console.error(e); toast("Could not load map data: " + e.message, 8000); });
+
+function loadDetail() {
+  if (loadDetail.started) return;
+  loadDetail.started = true; map.markDetailLoading();
+  fetch("data/world10.json").then((r) => r.json()).then((w) => map.setDetail(w)).catch(() => {});
+}
+
+// older records stored from/to dates; now a place keeps a list of {y, m} visits
+function migrate(p) {
+  if (!Array.isArray(p.visits)) {
+    p.visits = [];
+    if (p.from) p.visits.push({ y: +p.from.slice(0, 4), m: +p.from.slice(5, 7) || 0 });
+    delete p.from; delete p.to;
+  }
+  return p;
+}
+function addVisit(p, v) {
+  if (!v.y || p.visits.some((x) => x.y === v.y && x.m === v.m)) return;
+  p.visits.push(v);
+  p.visits.sort((a, b) => b.y - a.y || b.m - a.m);
+}
+
+function refresh() {
+  const list = [...state.places.values()];
+  map.setPins(list);
+  map.setVisited(new Set(list.filter((p) => (p.status === "visited" || p.status === "lived") && p.a3).map((p) => p.a3)));
+  $("#count").textContent = list.filter((p) => p.status !== "label").length;
+  $("#hint").hidden = list.length > 0 || !!state.pick;
+  if (!$("#list").hidden) renderList();
+}
+
+// ---------------- toast / tooltip ----------------
+let toastTimer;
+function toast(msg, ms = 2600) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("on");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), ms);
+}
+function onHover(h) {
+  const tip = $("#tip");
+  if (!h) { tip.hidden = true; return; }
+  tip.textContent = state.pick && h.list.length === 1 ? `Add photos to “${h.list[0].name}”`
+    : h.list.length === 1 ? (h.list[0].name || "Unnamed place") : `${h.list.length} places — click to zoom in`;
+  tip.style.left = h.x + 14 + "px"; tip.style.top = h.y + 10 + "px"; tip.hidden = false;
+}
+
+// ---------------- new pin popover ----------------
+function chipsHTML(active) {
+  return STATUS.map((s) => `<button class="chip" data-s="${s.id}" aria-pressed="${s.id === active}"><i style="background:${s.color}"></i>${s.label}</button>`).join("");
+}
+
+function onMapClick({ lon, lat, feature }) {
+  const country = map.countryAt(lon, lat);
+  openPopover({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat, country, source: feature ? "map" : "click" });
+}
+function onPinClick(id) {
+  if (state.pick) return attachAndDrop(state.pick, id).then(() => endPick());
+  openCard(id);
+}
+
+function openPopover(d) {
+  closeResults();
+  state.draft = { ...d, status: state.draft?.status && state.draft.status !== "label" ? state.draft.status : "visited" };
+  $("#pName").value = d.name || "";
+  $("#pName").placeholder = "Name this place";
+  const where = d.country?.name || d.countryName || "";
+  $("#pMeta").textContent = [d.kind ? kindLabel(d.kind) : "", where, fmtLL(d.lon, d.lat)].filter(Boolean).join(" · ");
+  $("#pStatus").innerHTML = chipsHTML(state.draft.status);
+  $("#pAdd").textContent = state.pick ? `Pin it + add ${plural(state.pick.files.length, "photo")}` : "Stick a pin";
+  map.setTarget([d.lon, d.lat]);
+  $("#pop").hidden = false;
+  positionPopover();
+  if (!d.name) $("#pName").focus();
+}
+function closePopover() { $("#pop").hidden = true; state.draft = null; map.setTarget(null); }
+function positionPopover() {
+  const pop = $("#pop");
+  if (pop.hidden || !state.draft || innerWidth <= 700) return;
+  const [x, y] = map.screenOf(state.draft.lon, state.draft.lat);
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  let left = x + 24, top = y - h / 2;
+  if (left + w > innerWidth - 12) left = x - w - 24;
+  top = Math.max(70, Math.min(innerHeight - h - 12, top));
+  pop.style.left = Math.max(12, left) + "px"; pop.style.top = top + "px";
+}
+$("#pStatus").addEventListener("click", (e) => {
+  const b = e.target.closest(".chip"); if (!b || !state.draft) return;
+  state.draft.status = b.dataset.s; $("#pStatus").innerHTML = chipsHTML(b.dataset.s);
+  if (!state.pick) $("#pAdd").textContent = b.dataset.s === "label" ? "Add to map" : "Stick a pin";
+});
+$("#pCancel").addEventListener("click", closePopover);
+$("#pName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#pAdd").click(); });
+$("#pAdd").addEventListener("click", async () => {
+  const d = state.draft; if (!d) return;
+  const p = await createPlace({ name: $("#pName").value, lon: d.lon, lat: d.lat, status: d.status, kind: d.kind, country: d.country, countryName: d.countryName, source: d.source });
+  closePopover();
+  if (state.pick) {
+    await attachAndDrop(state.pick, p.id);
+    endPick();
+    if (!imp.groups.length) openCard(p.id);
+  } else openCard(p.id);
+});
+
+async function createPlace({ name, lon, lat, status = "visited", kind = "", country, countryName = "", source = "click" }) {
+  country = country || map.countryAt(lon, lat);
+  const p = {
+    id: store.uid(), name: (name || "").trim() || "Unnamed place", lon: +lon.toFixed(5), lat: +lat.toFixed(5),
+    status, kind: kind || "", a3: country?.a3 || "", country: country?.name || countryName || "",
+    notes: "", visits: [], createdAt: Date.now(), source,
+  };
+  await store.putPlace(p);
+  state.places.set(p.id, p);
+  refresh();
+  return p;
+}
+
+// ---------------- place card ----------------
+let saveTimer, photoURLs = [];
+async function openCard(id) {
+  const p = state.places.get(id); if (!p) return;
+  closePopover();
+  state.current = id;
+  $("#cName").value = p.name;
+  $("#cMeta").textContent = [p.kind ? kindLabel(p.kind) : "", p.country, fmtLL(p.lon, p.lat)].filter(Boolean).join(" · ");
+  $("#cStatus").innerHTML = chipsHTML(p.status);
+  $("#cNotes").value = p.notes || "";
+  $("#cSaved").textContent = p.updatedAt ? "Saved " + new Date(p.updatedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
+  renderVisits();
+  resetDelete();
+  $("#card").hidden = false;
+  if (innerWidth <= 700) { $("#list").hidden = true; $("#import").hidden = true; }
+  await renderPhotos();
+}
+function closeCard() { $("#card").hidden = true; state.current = null; revokePhotos(); }
+
+function scheduleSave() {
+  const p = state.places.get(state.current); if (!p) return;
+  p.name = $("#cName").value.trim() || "Unnamed place";
+  p.notes = $("#cNotes").value;
+  $("#cSaved").textContent = "Saving…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => { await store.putPlace(p); $("#cSaved").textContent = "Saved"; refresh(); }, 400);
+}
+["#cName", "#cNotes"].forEach((s) => $(s).addEventListener("input", scheduleSave));
+$("#cStatus").addEventListener("click", async (e) => {
+  const b = e.target.closest(".chip"); const p = state.places.get(state.current); if (!b || !p) return;
+  p.status = b.dataset.s; $("#cStatus").innerHTML = chipsHTML(p.status);
+  renderVisits();
+  await store.putPlace(p); refresh();
+});
+
+// visits ("June 2026")
+(function fillVisitSelects() {
+  const now = new Date();
+  $("#vMonth").innerHTML = `<option value="0">Month (optional)</option>` + MONTHS.map((m, i) => `<option value="${i + 1}">${m}</option>`).join("");
+  $("#vMonth").value = String(now.getMonth() + 1);
+  let y = "";
+  for (let i = now.getFullYear(); i >= 1950; i--) y += `<option>${i}</option>`;
+  $("#vYear").innerHTML = y;
+})();
+function renderVisits() {
+  const p = state.places.get(state.current); if (!p) return;
+  $("#cVisitsBox").hidden = p.status === "label" || p.status === "wish";
+  $("#cVisits").innerHTML = p.visits.length
+    ? p.visits.map((v, i) => `<span class="vchip">${esc(fmtVisit(v))}<button data-rm="${i}" aria-label="Remove ${esc(fmtVisit(v))}">×</button></span>`).join("")
+    : `<span class="saved">No date yet — photos with a date fill this in automatically.</span>`;
+}
+$("#vAdd").addEventListener("click", async () => {
+  const p = state.places.get(state.current); if (!p) return;
+  addVisit(p, { y: +$("#vYear").value, m: +$("#vMonth").value });
+  renderVisits(); await store.putPlace(p); refresh();
+});
+$("#cVisits").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-rm]"); const p = state.places.get(state.current); if (!b || !p) return;
+  p.visits.splice(+b.dataset.rm, 1);
+  renderVisits(); await store.putPlace(p); refresh();
+});
+
+function resetDelete() { const b = $("#cDelete"); b.textContent = "Delete place"; b.dataset.armed = ""; }
+$("#cDelete").addEventListener("click", async () => {
+  const b = $("#cDelete");
+  if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "Click again to delete with photos"; setTimeout(resetDelete, 4000); return; }
+  const id = state.current;
+  await store.deletePlace(id); state.places.delete(id);
+  closeCard(); refresh(); toast("Place deleted");
+});
+
+// photos inside a card
+function revokePhotos() { photoURLs.forEach((u) => URL.revokeObjectURL(u)); photoURLs = []; }
+let cardPhotos = [];
+async function renderPhotos() {
+  revokePhotos();
+  if (!state.current) return;
+  cardPhotos = await store.photosOf(state.current);
+  $("#cPhotos").innerHTML = cardPhotos.map((ph, i) => {
+    const u = URL.createObjectURL(ph.thumb); photoURLs.push(u);
+    return `<div class="ph"><button class="ph-open" data-i="${i}" aria-label="Open photo ${i + 1}"><img src="${u}" alt=""></button><button class="del" data-del="${esc(ph.id)}" aria-label="Remove photo">×</button></div>`;
+  }).join("") + `<div class="drop">${cardPhotos.length ? "Drop more photos here" : "Drop photos here or use “Add photos”"}</div>`;
+}
+$("#cPhotos").addEventListener("click", async (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) { await store.deletePhoto(del.dataset.del); await renderPhotos(); return; }
+  const ph = e.target.closest("[data-i]");
+  if (ph) openLightbox(+ph.dataset.i);
+});
+$("#cFiles").addEventListener("change", async (e) => {
+  const files = [...e.target.files]; e.target.value = "";
+  if (!state.current || !files.length) return;
+  const metas = await readPhotos(files);
+  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current);
+});
+const cardDrop = $("#cPhotos");
+cardDrop.addEventListener("dragover", (e) => { e.preventDefault(); cardDrop.classList.add("dragover"); });
+cardDrop.addEventListener("dragleave", () => cardDrop.classList.remove("dragover"));
+cardDrop.addEventListener("drop", async (e) => {
+  e.preventDefault(); cardDrop.classList.remove("dragover");
+  const files = [...e.dataTransfer.files].filter(isImage);
+  if (!state.current || !files.length) return;
+  const metas = await readPhotos(files);
+  await attachGroup({ files: metas, visits: visitsOf(metas) }, state.current);
+});
+
+async function resizeImage(file, max, q) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const s = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+  c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close?.();
+  const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("encode"))), "image/jpeg", q));
+  return [blob, c.width, c.height];
+}
+
+// ---------------- photo import: read EXIF, group, suggest places ----------------
+const isImage = (f) => f.type.startsWith("image/") || /\.(heic|heif)$/i.test(f.name);
+
+async function readPhotos(files) {
+  const out = [];
+  for (const file of files) {
+    const m = { file, thumb: null, lat: null, lon: null, date: null };
+    try {
+      const d = await exifr.parse(file, { gps: true, tiff: true, exif: true });
+      if (d && isFinite(d.latitude) && isFinite(d.longitude) && (d.latitude || d.longitude)) { m.lat = d.latitude; m.lon = d.longitude; }
+      const dt = d && (d.DateTimeOriginal || d.CreateDate || d.ModifyDate);
+      if (dt instanceof Date && !isNaN(dt)) m.date = dt;
+    } catch { /* no EXIF */ }
+    try { [m.thumb] = await resizeImage(file, 360, 0.8); } catch { m.broken = true; }
+    out.push(m);
+  }
+  return out;
+}
+function visitsOf(metas) {
+  const seen = new Map();
+  for (const m of metas) if (m.date) { const k = m.date.getFullYear() * 100 + m.date.getMonth() + 1; seen.set(k, { y: m.date.getFullYear(), m: m.date.getMonth() + 1 }); }
+  return [...seen.values()].sort((a, b) => b.y - a.y || b.m - a.m);
+}
+const km = (a, b) => Math.hypot((a.lon - b.lon) * Math.cos((a.lat * Math.PI) / 180) * 111.32, (a.lat - b.lat) * 110.57);
+
+async function startImport(files) {
+  files = files.filter(isImage);
+  if (!files.length) return;
+  closeCard(); toggleList(false); closePopover(); endPick(false);
+  $("#import").hidden = false;
+  $("#importNote").textContent = "";
+  $("#groups").innerHTML = `<p class="empty">Reading ${plural(files.length, "photo")}…</p>`;
+  await search.loadGazetteer("data/gazetteer.json");
+  const metas = await readPhotos(files);
+  const broken = metas.filter((m) => m.broken);
+  const ok = metas.filter((m) => !m.broken);
+  const placesList = [...state.places.values()].filter((p) => p.status !== "label");
+  const groups = [];
+  for (const m of ok) {
+    if (m.lat == null) {
+      const key = m.date ? `${m.date.getFullYear()}-${m.date.getMonth()}` : "nodate";
+      let g = groups.find((g) => g.noLoc === key);
+      if (!g) groups.push((g = { noLoc: key, files: [] }));
+      g.files.push(m); continue;
+    }
+    const near = placesList.map((p) => ({ p, d: km(p, m) })).filter((x) => x.d < 25).sort((a, b) => a.d - b.d)[0];
+    let g = near ? groups.find((g) => g.pinId === near.p.id)
+      : groups.find((g) => !g.pinId && g.lat != null && km(g, m) < 12);
+    if (!g) groups.push((g = near ? { pinId: near.p.id, files: [] } : { lat: m.lat, lon: m.lon, files: [] }));
+    g.files.push(m);
+    if (!g.pinId) {   // running centroid
+      const n = g.files.length;
+      g.lat += (m.lat - g.lat) / n; g.lon += (m.lon - g.lon) / n;
+    }
+  }
+  for (const g of groups) {
+    g.id = store.uid();
+    g.visits = visitsOf(g.files);
+    if (g.lat != null && !g.pinId) suggest(g);
+  }
+  // groups with a location first, then those that need a decision
+  imp.groups.push(...groups.sort((a, b) => (a.noLoc ? 1 : 0) - (b.noLoc ? 1 : 0)));
+  if (broken.length) toast(`${plural(broken.length, "photo")} couldn't be opened by this browser (HEIC?). Try JPEG.`, 6000);
+  renderGroups();
+}
+function suggest(g) {
+  const s = search.nearest(g.lon, g.lat, 40);
+  const c = map.countryAt(g.lon, g.lat);
+  g.country = c; g.countryName = c?.name || s?.country || ""; g.kind = s?.sight ? s.kind : s ? "city" : "";
+  g.name = s && (s.sight || s.km < 15) ? s.name : "";
+  g.where = s ? `${s.km < 1.5 ? "In" : "Near"} ${s.name}${g.countryName ? ", " + g.countryName : ""}` : g.countryName ? `Somewhere in ${g.countryName}` : "Location found in photos";
+}
+
+function visitsText(vs) {
+  if (!vs?.length) return "";
+  const t = vs.slice(0, 3).map(fmtVisit).join(", ");
+  return vs.length > 3 ? t + "…" : t;
+}
+function renderGroups() {
+  imp.urls.forEach((u) => URL.revokeObjectURL(u)); imp.urls = [];
+  if (!imp.groups.length) { $("#import").hidden = true; return; }
+  const total = imp.groups.reduce((n, g) => n + g.files.length, 0);
+  $("#importNote").textContent = `${plural(total, "photo")} to place. Location and date come from the photos themselves; check and confirm each group.`;
+  const others = [...state.places.values()].filter((p) => p.status !== "label").sort((a, b) => a.name.localeCompare(b.name));
+  $("#groups").innerHTML = imp.groups.map((g) => {
+    const thumbs = g.files.slice(0, 5).map((f) => { const u = URL.createObjectURL(f.thumb); imp.urls.push(u); return `<img src="${u}" alt="">`; }).join("")
+      + (g.files.length > 5 ? `<span>+${g.files.length - 5}</span>` : "");
+    const head = `<div class="strip">${thumbs}</div><b>${plural(g.files.length, "photo")}${g.visits.length ? " · " + esc(visitsText(g.visits)) : ""}</b>`;
+    const skip = `<button class="linkbtn muted" data-act="skip">Skip</button>`;
+    if (g.pinId) {
+      const p = state.places.get(g.pinId);
+      return `<div class="group" data-g="${g.id}">${head}<small>Taken near your place “${esc(p?.name)}”</small>
+        <div class="row"><button class="btn primary" data-act="attach">Add to ${esc(p?.name)}</button><button class="btn ghost" data-act="new">New place</button><button class="linkbtn" data-act="show">Show</button>${skip}</div></div>`;
+    }
+    if (g.lat != null) {
+      return `<div class="group" data-g="${g.id}">${head}<small>${esc(g.where)}</small>
+        <input data-name value="${esc(g.name)}" placeholder="Name this place" aria-label="Place name">
+        <div class="row"><button class="btn primary" data-act="create">Stick a pin</button><button class="linkbtn" data-act="show">Show on map</button>${skip}</div></div>`;
+    }
+    return `<div class="group" data-g="${g.id}">${head}<small>No location saved in these photos</small>
+      <div class="row"><button class="btn primary" data-act="pick">Choose on map</button>${skip}</div>
+      ${others.length ? `<select data-act="to" aria-label="Add to one of your places"><option value="">…or add to one of your places</option>${others.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>` : ""}</div>`;
+  }).join("");
+}
+const groupById = (id) => imp.groups.find((g) => g.id === id);
+function dropGroup(g) { imp.groups = imp.groups.filter((x) => x !== g); renderGroups(); }
+
+$("#groups").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-act]"); if (!b || b.tagName === "SELECT") return;
+  const box = b.closest("[data-g]"); const g = groupById(box?.dataset.g); if (!g) return;
+  const act = b.dataset.act;
+  if (act === "skip") return dropGroup(g);
+  if (act === "show") {
+    const c = g.pinId ? state.places.get(g.pinId) : g;
+    map.setTarget([c.lon, c.lat]);
+    return map.flyTo(c.lon, c.lat, 7.5, innerWidth > 700 ? -180 : 0);
+  }
+  if (act === "new") {   // detach from the nearby pin, make it its own place
+    const f0 = g.files[0]; delete g.pinId; g.lat = f0.lat; g.lon = f0.lon; suggest(g); return renderGroups();
+  }
+  if (act === "pick") return startPick(g);
+  b.disabled = true;
+  if (act === "attach") { await attachGroup(g, g.pinId); dropGroup(g); }
+  if (act === "create") {
+    const p = await createPlace({ name: box.querySelector("[data-name]").value || g.name, lon: g.lon, lat: g.lat, kind: g.kind, country: g.country, countryName: g.countryName, source: "photo" });
+    await attachGroup(g, p.id); dropGroup(g); map.setTarget(null);
+  }
+});
+$("#groups").addEventListener("change", async (e) => {
+  const s = e.target.closest('select[data-act="to"]'); if (!s || !s.value) return;
+  const g = groupById(s.closest("[data-g]").dataset.g);
+  await attachGroup(g, s.value); dropGroup(g);
+});
+
+// save a group's photos into a place; dates from the photos become visits
+async function attachGroup(g, placeId) {
+  const p = state.places.get(placeId); if (!p) return;
+  const files = g.files.filter((f) => !f.broken);
+  let done = 0;
+  for (const f of files) {
+    toast(`Saving photos ${++done}/${files.length}…`, 10000);
+    try {
+      const [blob, w, h] = await resizeImage(f.file, 2048, 0.86);
+      const thumb = f.thumb || (await resizeImage(f.file, 360, 0.8))[0];
+      await store.putPhoto({ id: store.uid(), placeId, blob, thumb, w, h, name: f.file.name, takenAt: f.date ? +f.date : null, addedAt: Date.now() });
+    } catch { done--; }
+  }
+  if (p.status === "wish" && g.visits?.length) p.status = "visited";
+  for (const v of g.visits || []) addVisit(p, v);
+  await store.putPlace(p);
+  refresh();
+  if (state.current === placeId) { renderVisits(); $("#cStatus").innerHTML = chipsHTML(p.status); await renderPhotos(); }
+  toast(done ? `${plural(done, "photo")} added to ${p.name}` : "No photos could be saved", 3000);
+}
+
+// "Choose on map" for photos without GPS: next map click / pin click / search result decides
+function startPick(g) {
+  state.pick = g;
+  $("#import").hidden = true; $("#hint").hidden = true;
+  $("#pickText").textContent = `Where ${g.files.length === 1 ? "was this photo" : `were these ${g.files.length} photos`} taken? Click the map, a pin, or search.`;
+  $("#pickBar").hidden = false;
+}
+function endPick(reopen = true) {
+  if (!state.pick) return;
+  state.pick = null;
+  $("#pickBar").hidden = true;
+  if (reopen) { if (imp.groups.length) $("#import").hidden = false; }
+  refresh();
+}
+$("#pickCancel").addEventListener("click", () => { closePopover(); endPick(); });
+// attach a picked group, then remove it from the import list
+async function attachAndDrop(g, id) { await attachGroup(g, id); if (imp.groups.includes(g)) dropGroup(g); }
+
+// top-bar button + drag & drop anywhere on the map
+$("#importFiles").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; startImport(f); });
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+addEventListener("dragenter", (e) => { if (hasFiles(e)) { dragDepth++; $("#dropzone").hidden = !!e.target.closest?.("#card"); } });
+addEventListener("dragover", (e) => { if (hasFiles(e)) { e.preventDefault(); $("#dropzone").hidden = !!e.target.closest?.("#card"); } });
+addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $("#dropzone").hidden = true; });
+addEventListener("drop", (e) => {
+  dragDepth = 0; $("#dropzone").hidden = true;
+  if (!hasFiles(e) || e.target.closest?.("#card")) return;
+  e.preventDefault();
+  startImport([...e.dataTransfer.files]);
+});
+
+// lightbox
+let lbURLs = [];
+function openLightbox(i) {
+  const track = $("#lbTrack");
+  lbURLs = cardPhotos.map((p) => URL.createObjectURL(p.blob));
+  track.innerHTML = lbURLs.map((u, j) => `<figure><img src="${u}" alt="Photo ${j + 1}"></figure>`).join("");
+  $("#lightbox").hidden = false;
+  track.children[i]?.scrollIntoView({ inline: "center", block: "nearest" });
+  $("#lbClose").focus();
+}
+function closeLightbox() { $("#lightbox").hidden = true; $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
+function lbStep(d) { const t = $("#lbTrack"); t.scrollBy({ left: d * t.clientWidth, behavior: "smooth" }); }
+$("#lbPrev").addEventListener("click", () => lbStep(-1));
+$("#lbNext").addEventListener("click", () => lbStep(1));
+$("#lbClose").addEventListener("click", closeLightbox);
+
+// ---------------- my places list ----------------
+function toggleList(show = $("#list").hidden) {
+  $("#list").hidden = !show; $("#btnList").setAttribute("aria-expanded", show);
+  if (show) { $("#import").hidden = true; if (innerWidth <= 700) closeCard(); renderList(); }
+}
+$("#btnList").addEventListener("click", () => toggleList());
+
+async function renderList() {
+  const all = [...state.places.values()];
+  const been = all.filter((p) => p.status === "visited" || p.status === "lived");
+  const countries = new Set(been.map((p) => p.country).filter(Boolean));
+  const photos = await store.countPhotos();
+  $("#stats").innerHTML = [["Countries", countries.size], ["Places been", been.length], ["Photos", photos]]
+    .map(([l, n]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join("");
+  $("#filter").innerHTML = [{ id: "all", label: "All" }, ...STATUS]
+    .map((s) => `<button class="chip" data-f="${s.id}" aria-pressed="${state.filter === s.id}">${s.id === "all" ? "" : `<i style="background:${s.color}"></i>`}${s.label}</button>`).join("");
+  const list = all.filter((p) => state.filter === "all" || p.status === state.filter);
+  if (!list.length) {
+    $("#places").innerHTML = `<p class="empty">${all.length ? "Nothing in this filter yet." : "No places yet. Click on the map, search, or add photos to stick your first pin."}</p>`;
+    return;
+  }
+  const groups = new Map();
+  for (const p of list) { const c = p.country || "Elsewhere"; if (!groups.has(c)) groups.set(c, []); groups.get(c).push(p); }
+  $("#places").innerHTML = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([c, ps]) =>
+    `<div class="country-h"><span>${esc(c)}</span><span>${ps.length}</span></div>` +
+    ps.sort((a, b) => a.name.localeCompare(b.name)).map((p) =>
+      `<button class="place" data-id="${esc(p.id)}"><i style="background:${statusOf(p.status).color}"></i><span>${esc(p.name)}</span><small>${esc(whenShort(p))}</small></button>`).join("")
+  ).join("");
+}
+$("#filter").addEventListener("click", (e) => { const b = e.target.closest("[data-f]"); if (b) { state.filter = b.dataset.f; renderList(); } });
+$("#places").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-id]"); if (!b) return;
+  const p = state.places.get(b.dataset.id);
+  if (innerWidth <= 700) toggleList(false);
+  await openCard(p.id);
+  map.flyTo(p.lon, p.lat, Math.max(map.zoomLevel(), 6), innerWidth > 700 ? 180 : 0);
+});
+
+// backup
+$("#btnExport").addEventListener("click", async () => {
+  const data = await store.exportAll();
+  const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+  const filename = `pinmap-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  // inside a Claude artifact, downloads go through the platform's `downloads` capability
+  const dl = window.claude?.use ? await window.claude.use("downloads").catch(() => null) : null;
+  if (dl) {
+    try { await dl.save({ filename, data: blob }); toast("Backup saved"); }
+    catch (err) { toast(err?.code === "declined" ? "Backup cancelled" : "Couldn't save the backup here: " + (err?.message || err?.code), 4000); }
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast("Backup prepared — check your downloads", 3000);
+});
+$("#fileImport").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    const n = await store.importAll(JSON.parse(await f.text()));
+    state.places.clear(); for (const p of await store.allPlaces()) state.places.set(p.id, migrate(p));
+    refresh(); toast(`Imported ${n} places`);
+  } catch (err) { toast("Import failed: " + err.message, 5000); }
+});
+
+// ---------------- search ----------------
+let qTimer;
+const q = $("#q");
+q.addEventListener("focus", () => search?.loadGazetteer("data/gazetteer.json"));
+q.addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(runSearch, 110); });
+q.addEventListener("keydown", (e) => {
+  const n = state.results.length + (Array.isArray(state.online) ? state.online.length : 0);
+  if (e.key === "ArrowDown") { e.preventDefault(); setSel(Math.min(n, state.sel + 1)); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); setSel(Math.max(0, state.sel - 1)); }
+  else if (e.key === "Enter") { e.preventDefault(); $(`#results [data-n="${Math.max(0, state.sel)}"]`)?.click(); }
+  else if (e.key === "Escape") { closeResults(); q.blur(); }
+});
+
+async function runSearch() {
+  const text = q.value.trim();
+  if (!text || !search) return closeResults();
+  await search.loadGazetteer("data/gazetteer.json");
+  if (q.value.trim() !== text) return;
+  const mine = [...state.places.values()].map((p) => ({ ...p, mine: true, w: 0, kind: p.kind || "place" }));
+  state.results = search.search(text, mine);
+  state.online = null; state.sel = -1;
+  renderResults(text);
+}
+const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: "≈", sea: "≈", lake: "≈", bay: "≈", gulf: "≈", peak: "▲", mountain: "▲", volcano: "▲", range: "⋀", waterfall: "⌇", island: "◌", islands: "◌", desert: "∴", canyon: "⋁", park: "♣", forest: "♣", glacier: "❄" };
+function renderResults(text) {
+  const r = state.results;
+  const row = (it, i) => {
+    const sub = it.mine ? `Your place · ${statusOf(it.status).label}` :
+      [kindLabel(it.kind), it.country || it.sub?.split(",").slice(-1)[0]?.trim()].filter(Boolean).join(" · ");
+    const icon = it.mine ? "●" : ICON[it.kind] || "•";
+    return `<button class="res" role="option" data-n="${i}" aria-selected="${i === state.sel}"><span class="ic" ${it.mine ? `style="color:${statusOf(it.status).color}"` : ""}>${icon}</span><span><b>${esc(it.name)}</b><small>${esc(sub)}</small></span></button>`;
+  };
+  let html = r.length ? r.map(row).join("") : `<p class="res-note">Nothing found in the built-in atlas.</p>`;
+  if (state.online === "loading") html += `<p class="res-note">Searching OpenStreetMap…</p>`;
+  else if (Array.isArray(state.online)) {
+    html += `<div class="res-sec">OpenStreetMap</div>` + (state.online.length
+      ? state.online.map((it, i) => row(it, r.length + i)).join("") : `<p class="res-note">No online results.</p>`);
+  } else if (typeof state.online === "string") html += `<p class="res-note">${esc(state.online)}</p>`;
+  else html += `<button class="res res-online" data-online="1" data-n="${r.length}"><span class="ic">⌕</span><span><b>Search OpenStreetMap for “${esc(text)}”</b><small>Villages, streets, viewpoints, anything not in the atlas</small></span></button>`;
+  $("#results").innerHTML = html;
+  $("#results").hidden = false;
+}
+function setSel(i) {
+  state.sel = i;
+  document.querySelectorAll("#results [data-n]").forEach((b) => b.setAttribute("aria-selected", +b.dataset.n === i));
+  $(`#results [data-n="${i}"]`)?.scrollIntoView({ block: "nearest" });
+}
+function closeResults() { $("#results").hidden = true; state.sel = -1; }
+
+$("#results").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-n]"); if (!b) return;
+  if (b.dataset.online) {
+    const text = q.value.trim();
+    state.online = "loading"; renderResults(text);
+    try { state.online = await searchOnline(text); }
+    catch { state.online = "Online search isn't reachable from here (it works when the app runs from your own computer or a normal web host)."; }
+    renderResults(text);
+    return;
+  }
+  const i = +b.dataset.n;
+  const it = i < state.results.length ? state.results[i] : state.online[i - state.results.length];
+  closeResults(); q.blur();
+  if (it.mine) {
+    if (state.pick) { await attachAndDrop(state.pick, it.id); return endPick(); }
+    await openCard(it.id);
+    map.flyTo(it.lon, it.lat, Math.max(6, map.zoomLevel()), innerWidth > 700 ? 180 : 0);
+    return;
+  }
+  closeCard();
+  map.setTarget([it.lon, it.lat]);
+  await map.flyTo(it.lon, it.lat, zoomFor(it.kind, it.sight));
+  const country = map.countryAt(it.lon, it.lat);
+  openPopover({ name: it.name, kind: it.kind, lon: it.lon, lat: it.lat, country, countryName: it.country, source: it.source || "atlas" });
+});
+
+// ---------------- file pickers ----------------
+// Buttons open their file input programmatically inside the tap handler; the inputs stay in
+// the layout (not display:none), which is what iOS / in-app webviews need to show the picker.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-file]"); if (!b) return;
+  document.getElementById(b.dataset.file).click();
+});
+
+// ---------------- global ----------------
+document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
+  const w = b.dataset.close;
+  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; } else toggleList(false);
+}));
+$("#zIn").addEventListener("click", () => map.zoomBy(2));
+$("#zOut").addEventListener("click", () => map.zoomBy(0.5));
+$("#zHome").addEventListener("click", () => map.home());
+document.addEventListener("click", (e) => { if (!e.target.closest(".search")) closeResults(); });
+document.addEventListener("keydown", (e) => {
+  if (!$("#lightbox").hidden) {
+    if (e.key === "Escape") closeLightbox();
+    if (e.key === "ArrowRight") lbStep(1);
+    if (e.key === "ArrowLeft") lbStep(-1);
+    return;
+  }
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
+  if (e.key === "/" && !typing) { e.preventDefault(); q.focus(); }
+  if (e.key === "Escape") {
+    if (!$("#pop").hidden) closePopover();
+    else if (state.pick) endPick();
+    else if (!$("#card").hidden) closeCard();
+  }
+});
+
+function fmtLL(lon, lat) {
+  return `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? "N" : "S"} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? "E" : "W"}`;
+}
+function whenShort(p) {
+  if (p.status === "wish") return "someday";
+  if (!p.visits?.length) return "";
+  return fmtVisitShort(p.visits[0]) + (p.visits.length > 1 ? ` +${p.visits.length - 1}` : "");
+}
