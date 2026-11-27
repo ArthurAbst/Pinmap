@@ -172,10 +172,12 @@ function chipsHTML(active) {
   return STATUS.map((s) => `<button class="chip" data-s="${s.id}" aria-pressed="${s.id === active}"><i style="background:${s.color}"></i>${s.label}</button>`).join("");
 }
 
-function onMapClick({ lon, lat, feature }) {
+function onMapClick({ x, y, lon, lat, feature }) {
   if (!$("#peek").hidden) { hidePeek(); return; }   // first tap outside just closes the preview
   const country = map.countryAt(lon, lat);
-  openPopover({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat, country, source: feature ? "map" : "click" });
+  // missed a pin by a little? offer it in the popover
+  const nearId = state.pick ? null : map.nearestPin?.(x, y, 70);
+  openPopover({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat, country, source: feature ? "map" : "click", nearId });
 }
 function onPinClick(id) {
   if (state.pick) return attachAndDrop(state.pick, id).then(() => endPick());
@@ -190,6 +192,12 @@ function openPopover(d) {
   const where = d.country?.name || d.countryName || "";
   $("#pMeta").textContent = [d.kind ? kindLabel(d.kind) : "", where, fmtLL(d.lon, d.lat)].filter(Boolean).join(" · ");
   $("#pStatus").innerHTML = chipsHTML(state.draft.status);
+  const near = d.nearId && state.places.get(d.nearId);
+  $("#pNear").hidden = !near;
+  if (near) {
+    $("#pNear").innerHTML = `<i style="background:${statusOf(near.status).color}"></i><span>Open <b>${esc(near.name)}</b> instead</span>`;
+    $("#pNear").dataset.id = near.id;
+  }
   $("#pAdd").textContent = state.pick ? `Pin it + add ${plural(state.pick.files.length, "photo")}` : "Stick a pin";
   map.setTarget([d.lon, d.lat]);
   $("#pop").hidden = false;
@@ -213,6 +221,7 @@ $("#pStatus").addEventListener("click", (e) => {
   if (!state.pick) $("#pAdd").textContent = b.dataset.s === "label" ? "Add to map" : "Stick a pin";
 });
 $("#pCancel").addEventListener("click", closePopover);
+$("#pNear").addEventListener("click", () => { const id = $("#pNear").dataset.id; closePopover(); showPeek(id, true); });
 $("#pName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#pAdd").click(); });
 $("#pAdd").addEventListener("click", async () => {
   const d = state.draft; if (!d) return;

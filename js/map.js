@@ -296,7 +296,7 @@ export function createMap(canvas, { world50, labels, initialView }) {
         const t = c.list[0].name || "";
         const tw = textW("600 13px Barlow, sans-serif", 0, t);
         const box = [c.sx + 19, c.sy - 28, tw, 16];
-        if (t && grid.free(box, 1)) { grid.add(box); c.label = t; }
+        if (t && grid.free(box, 1)) { grid.add(box); c.label = t; c.labelW = tw; }
       }
     }
     clusters = cl;
@@ -320,7 +320,7 @@ export function createMap(canvas, { world50, labels, initialView }) {
       } else if (c.label && !interacting) {
         text(c.label, sx + 19, sy - 20, "600 13px Barlow, sans-serif", C.label, 0, "left");
       }
-      pinHits.push({ x: head[0], y: head[1], sx, sy, list: c.list });
+      pinHits.push({ x: head[0], y: head[1], sx, sy, list: c.list, label: c.label && !interacting ? [sx + 19, sy - 28, c.labelW, 16] : null });
     }
   }
 
@@ -356,14 +356,7 @@ export function createMap(canvas, { world50, labels, initialView }) {
 
   // ---------- interaction ----------
   // `placed` is in screen coords of transform S; clicks happen after the gesture ends, so S === T.
-  function pinAt(x, y) {
-    for (let i = pinHits.length - 1; i >= 0; i--) {
-      const h = pinHits[i];
-      if (Math.hypot(h.x - x, h.y - y) < 11 || Math.hypot(h.sx - x, h.sy - y) < 6) return h;
-    }
-    for (const p of placed) if (p.it.st === "user" && Math.hypot(p.sx - x, p.sy - y) < 9) return { list: [p.it.place] };
-    return null;
-  }
+  const pinAt = (x, y, r = snapRadius()) => pickPin(pinHits, placed, x, y, r);
   function nearestFeature(x, y) {
     let best = null, bd = 1e9;
     for (const p of placed) {
@@ -434,9 +427,12 @@ export function createMap(canvas, { world50, labels, initialView }) {
     setVisited(set) { visited = set; invalidate(); },
     setTarget(ll) { target = ll ? projection(ll) : null; schedule(); },
     screenOf(lon, lat) { const [wx, wy] = projection([lon, lat]); return [T.k * wx + T.x, T.k * wy + T.y]; },
-    // Country under a point. Simplified coastlines leave seaside towns "in the sea",
+    
+
+// Country under a point. Simplified coastlines leave seaside towns "in the sea",
     // so if the exact point misses, probe rings of points 4–50 km around it.
     countryAt: makeCountryAt(countries),
+    nearestPin(x, y, max = 70) { const h = pickPin(pinHits, placed, x, y, max); return h && h.list.length === 1 ? h.list[0].id : null; },
     getView() {
       const [wx, wy] = T.invert([W / 2, H / 2]);
       const ll = projection.invert([wx, wy]);
@@ -525,6 +521,37 @@ export function createMap(canvas, { world50, labels, initialView }) {
 
 // Country under a point. Simplified coastlines leave seaside towns "in the sea",
 // so if the exact point misses, probe rings of points 4–50 km around it.
+// ---------- pin hit-testing ("snap"): shared by the flat map and the globe ----------
+// Distance from a point to a drawn pin: its needle, its head and its name label.
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy;
+  const t = l ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+export function pinDistance(h, x, y) {
+  let d = Math.min(Math.max(0, Math.hypot(h.x - x, h.y - y) - 8.6), segDist(x, y, h.sx, h.sy, h.x, h.y));
+  if (h.label) {
+    const [bx, by, bw, bh] = h.label;
+    d = Math.min(d, Math.hypot(Math.max(bx - x, 0, x - bx - bw), Math.max(by - y, 0, y - by - bh)));
+  }
+  return d;
+}
+/** Nearest pin (or user label) within `radius` px of (x, y), else null. */
+export function pickPin(hits, placed, x, y, radius) {
+  let best = null, bd = radius;
+  for (const h of hits) { const d = pinDistance(h, x, y); if (d <= bd) { bd = d; best = h; } }
+  for (const p of placed) {
+    if (p.it.st !== "user") continue;
+    const d = Math.max(0, Math.hypot(p.sx - x, p.sy - y) - 3.6);
+    if (d <= bd) { bd = d; best = { list: [p.it.place], sx: p.sx, sy: p.sy }; }
+  }
+  return best;
+}
+// Fingers need a bigger target than a mouse pointer.
+let lastPointer = "mouse";
+addEventListener("pointerdown", (e) => { lastPointer = e.pointerType || "mouse"; }, { capture: true, passive: true });
+export const snapRadius = () => (lastPointer === "mouse" ? 14 : 26);
+
 export function makeCountryAt(countries) {
   for (const c of countries) c.bounds ||= d3.geoBounds(c);
   const hit = ([x, y]) => countries.find((c) => {

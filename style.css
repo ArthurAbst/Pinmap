@@ -231,3 +231,9 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .modal-card .btn.primary{height:46px;justify-content:center}
 
 .zoomctl button svg{display:block;margin:auto}
+
+/* "did you mean the pin next to it?" in the new-place popover */
+.near{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);background:light-dark(#f6f8f9,#182a37);border-radius:10px;padding:8px 10px;font-size:14px;cursor:pointer;text-align:left;min-height:40px}
+.near[hidden]{display:none}
+.near i{width:10px;height:10px;border-radius:50%;background:var(--pin-visited);flex:none}
+.near b{font-weight:600}

@@ -8,7 +8,7 @@
 //   • rivers / province lines only at rest.
 // The public API mirrors js/map.js, so the app works with either.
 /* global d3, topojson */
-import { COLOR_VARS, STYLE, Grid, buildLabelItems, makeCountryAt, shade } from "./map.js";
+import { COLOR_VARS, STYLE, Grid, buildLabelItems, makeCountryAt, shade, pickPin, snapRadius } from "./map.js";
 
 const PIN_COLORS = { visited: "#d8312b", wish: "#e8a317" };
 const DEG = 180 / Math.PI, RAD = Math.PI / 180;
@@ -345,7 +345,7 @@ export function createGlobe(canvas, { world50, world110, labels, initialView }) 
         const t = c.list[0].name || "";
         const tw = textW("600 13px Barlow, sans-serif", 0, t);
         const box = [c.sx + 19, c.sy - 28, tw, 16];
-        if (t && grid.free(box, 1)) { grid.add(box); c.label = t; }
+        if (t && grid.free(box, 1)) { grid.add(box); c.label = t; c.labelW = tw; }
       }
     }
     return cl;
@@ -363,7 +363,7 @@ export function createGlobe(canvas, { world50, world110, labels, initialView }) 
         ctx.fillStyle = C.label; roundRect(head[0] + 7, head[1] - 16, w, 18, 9); ctx.fill();
         ctx.fillStyle = C.land; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(t, head[0] + 7 + w / 2, head[1] - 7);
       } else if (c.label) text(c.label, c.sx + 19, c.sy - 20, "600 13px Barlow, sans-serif", C.label, 0, "left");
-      pinHits.push({ x: head[0], y: head[1], sx: c.sx, sy: c.sy, list: c.list });
+      pinHits.push({ x: head[0], y: head[1], sx: c.sx, sy: c.sy, list: c.list, label: c.label ? [c.sx + 19, c.sy - 28, c.labelW, 16] : null });
     }
   }
   function roundRect(x, y, w, h, r) {
@@ -392,14 +392,7 @@ export function createGlobe(canvas, { world50, world110, labels, initialView }) 
   }
 
   // ---------- clicks & hover ----------
-  function pinAt(x, y) {
-    for (let i = pinHits.length - 1; i >= 0; i--) {
-      const h = pinHits[i];
-      if (Math.hypot(h.x - x, h.y - y) < 11 || Math.hypot(h.sx - x, h.sy - y) < 6) return h;
-    }
-    for (const p of placed) if (p.it.st === "user" && Math.hypot(p.sx - x, p.sy - y) < 9) return { list: [p.it.place] };
-    return null;
-  }
+  const pinAt = (x, y, r = snapRadius()) => pickPin(pinHits, placed, x, y, r);
   function nearestFeature(x, y) {
     let best = null, bd = 1e9;
     for (const p of placed) {
@@ -460,6 +453,7 @@ export function createGlobe(canvas, { world50, world110, labels, initialView }) 
     setTarget(ll) { target = ll; schedule(); },
     screenOf(lon, lat) { front(); return sxy(lon, lat, -1) || [-9999, -9999]; },
     countryAt,
+    nearestPin(x, y, max = 70) { const h = pickPin(pinHits, placed, x, y, max); return h && h.list.length === 1 ? h.list[0].id : null; },
     getView() { return { lon: +(-rot[0]).toFixed(3), lat: +(-rot[1]).toFixed(3), z: +ez().toFixed(2) }; },
     flyTo(lon, lat, z) { return animateTo(lon, lat, clampR(Math.max(rOfZ(z), R))); },
     zoomBy(f) { const c = centre(); return animateTo(c[0], c[1], clampR(R * f), 300); },
