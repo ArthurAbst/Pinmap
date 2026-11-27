@@ -11,12 +11,6 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
-const STATUS = [
-  { id: "visited", label: "Visited", color: "var(--pin-visited)" },
-  { id: "wish", label: "Want to go", color: "var(--pin-wish)" },
-  { id: "label", label: "Label only", color: "var(--pin-label)" },
-];
-const statusOf = (id) => STATUS.find((s) => s.id === id) || STATUS[0];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const fmtVisit = (v) => (v.m ? MONTHS[v.m - 1] + " " : "") + v.y;
 const fmtVisitShort = (v) => (v.m ? MONTHS[v.m - 1].slice(0, 3) + " " : "") + v.y;
@@ -84,7 +78,6 @@ async function reloadFromStore() {
         const p = state.places.get(state.current);
         if (document.activeElement !== $("#cName")) $("#cName").value = p.name;
         if (document.activeElement !== $("#cNotes")) $("#cNotes").value = p.notes || "";
-        $("#cStatus").innerHTML = chipsHTML(p.status);
         renderVisits(); renderPhotos();
       }
     }
@@ -109,7 +102,7 @@ async function repairPlaces() {
   for (const p of state.places.values()) {
     const before = JSON.stringify(p);
     migrate(p);
-    if (p.status === "lived") p.status = "visited";
+    if (p.status !== "visited") p.status = "visited";   // statuses were removed: every place is a place you've been
     if (!p.a3 && p.status !== "label") {
       const c = map.countryAt(p.lon, p.lat);
       if (c) { p.a3 = c.a3; p.country = p.country || c.name; }
@@ -136,7 +129,7 @@ function addVisit(p, v) {
 function refresh() {
   const list = [...state.places.values()];
   map.setPins(list);
-  map.setVisited(new Set(list.filter((p) => p.status === "visited" && p.a3).map((p) => p.a3)));
+  map.setVisited(new Set(list.filter((p) => p.a3).map((p) => p.a3)));
   $("#count").textContent = list.filter((p) => p.status !== "label").length;
   $("#hint").hidden = list.length > 0 || !!state.pick;
   if (!$("#list").hidden) renderList();
@@ -169,10 +162,6 @@ function onHover(h) {
 }
 
 // ---------------- new pin popover ----------------
-function chipsHTML(active) {
-  return STATUS.map((s) => `<button class="chip" data-s="${s.id}" aria-pressed="${s.id === active}"><i style="background:${s.color}"></i>${s.label}</button>`).join("");
-}
-
 function onMapClick({ x, y, lon, lat, feature }) {
   if (!$("#peek").hidden) { hidePeek(); return; }   // first tap outside just closes the preview
   const country = map.countryAt(lon, lat);
@@ -205,11 +194,10 @@ function openPopover(d) {
   $("#pName").placeholder = "Name this place";
   const where = d.country?.name || d.countryName || "";
   $("#pMeta").textContent = [d.kind ? kindLabel(d.kind) : "", where, fmtLL(d.lon, d.lat)].filter(Boolean).join(" · ");
-  $("#pStatus").innerHTML = chipsHTML(state.draft.status);
   const near = d.nearId && state.places.get(d.nearId);
   $("#pNear").hidden = !near;
   if (near) {
-    $("#pNear").innerHTML = `<i style="background:${statusOf(near.status).color}"></i><span>Open <b>${esc(near.name)}</b> instead</span>`;
+    $("#pNear").innerHTML = `<i></i><span>Open <b>${esc(near.name)}</b> instead</span>`;
     $("#pNear").dataset.id = near.id;
   }
   $("#pAdd").textContent = state.pick ? `Pin it + add ${plural(state.pick.files.length, "photo")}` : "Stick a pin";
@@ -233,11 +221,6 @@ function positionPopover() {
   top = Math.max(70, Math.min(innerHeight - h - 12, top));
   pop.style.left = Math.max(12, left) + "px"; pop.style.top = top + "px";
 }
-$("#pStatus").addEventListener("click", (e) => {
-  const b = e.target.closest(".chip"); if (!b || !state.draft) return;
-  state.draft.status = b.dataset.s; $("#pStatus").innerHTML = chipsHTML(b.dataset.s);
-  if (!state.pick) $("#pAdd").textContent = b.dataset.s === "label" ? "Add to map" : "Stick a pin";
-});
 $("#pCancel").addEventListener("click", closePopover);
 $("#pNear").addEventListener("click", () => { const id = $("#pNear").dataset.id; closePopover(); showPeek(id, true); });
 $("#pName").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#pAdd").click(); });
@@ -273,7 +256,6 @@ async function openCard(id) {
   state.current = id;
   $("#cName").value = p.name;
   $("#cMeta").textContent = [p.kind ? kindLabel(p.kind) : "", p.country, fmtLL(p.lon, p.lat)].filter(Boolean).join(" · ");
-  $("#cStatus").innerHTML = chipsHTML(p.status);
   $("#cNotes").value = p.notes || "";
   $("#cSaved").textContent = p.updatedAt ? "Saved " + new Date(p.updatedAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
   renderVisits();
@@ -292,13 +274,6 @@ function scheduleSave() {
   saveTimer = setTimeout(async () => { await store.putPlace(p); $("#cSaved").textContent = "Saved"; refresh(); }, 400);
 }
 ["#cName", "#cNotes"].forEach((s) => $(s).addEventListener("input", scheduleSave));
-$("#cStatus").addEventListener("click", async (e) => {
-  const b = e.target.closest(".chip"); const p = state.places.get(state.current); if (!b || !p) return;
-  p.status = b.dataset.s; $("#cStatus").innerHTML = chipsHTML(p.status);
-  renderVisits();
-  await store.putPlace(p); refresh();
-});
-
 // visits ("June 2026")
 (function fillVisitSelects() {
   const now = new Date();
@@ -310,7 +285,6 @@ $("#cStatus").addEventListener("click", async (e) => {
 })();
 function renderVisits() {
   const p = state.places.get(state.current); if (!p) return;
-  $("#cVisitsBox").hidden = p.status === "label" || p.status === "wish";
   $("#cVisits").innerHTML = p.visits.length
     ? p.visits.map((v, i) => `<span class="vchip">${esc(fmtVisit(v))}<button data-rm="${i}" aria-label="Remove ${esc(fmtVisit(v))}">×</button></span>`).join("")
     : `<span class="saved">No date yet — photos with a date fill this in automatically.</span>`;
@@ -546,7 +520,7 @@ async function attachGroup(g, placeId) {
   for (const v of g.visits || []) addVisit(p, v);
   await store.putPlace(p);
   refresh();
-  if (state.current === placeId) { renderVisits(); $("#cStatus").innerHTML = chipsHTML(p.status); await renderPhotos(); }
+  if (state.current === placeId) { renderVisits(); await renderPhotos(); }
   toast(done ? `${plural(done, "photo")} added to ${p.name}` : "No photos could be saved", 3000);
 }
 
@@ -655,7 +629,7 @@ async function showPeek(id, pinned) {
   peek.id = id; peek.pinned = pinned;
   closePopover(); onlySheet("peek");
   $("#pkName").textContent = p.name;
-  $("#pkMeta").textContent = [p.status === "wish" ? "Want to go" : p.visits?.map(fmtVisit).slice(0, 2).join(", "), p.country].filter(Boolean).join(" · ");
+  $("#pkMeta").textContent = [p.visits?.map(fmtVisit).slice(0, 2).join(", "), p.country].filter(Boolean).join(" · ");
   $("#pkNotes").textContent = (p.notes || "").trim();
   $("#pkNotes").hidden = !p.notes?.trim();
   const photos = await store.photosOf(id);
@@ -715,29 +689,46 @@ function toggleList(show = $("#list").hidden) {
 }
 $("#btnList").addEventListener("click", () => toggleList());
 
-async function renderList() {
+async function listStats() {
   const all = [...state.places.values()];
-  const been = all.filter((p) => p.status === "visited");
-  const countries = new Set(been.map((p) => p.country).filter(Boolean));
-  const photos = await store.countPhotos();
-  $("#stats").innerHTML = [["Countries", countries.size], ["Places been", been.length], ["Photos", photos]]
-    .map(([l, n]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join("");
-  $("#filter").innerHTML = [{ id: "all", label: "All" }, ...STATUS]
-    .map((s) => `<button class="chip" data-f="${s.id}" aria-pressed="${state.filter === s.id}">${s.id === "all" ? "" : `<i style="background:${s.color}"></i>`}${s.label}</button>`).join("");
-  const list = all.filter((p) => state.filter === "all" || p.status === state.filter);
-  if (!list.length) {
-    $("#places").innerHTML = `<p class="empty">${all.length ? "Nothing in this filter yet." : "No places yet. Click on the map, search, or add photos to stick your first pin."}</p>`;
-    return;
-  }
-  const groups = new Map();
-  for (const p of list) { const c = p.country || "Elsewhere"; if (!groups.has(c)) groups.set(c, []); groups.get(c).push(p); }
-  $("#places").innerHTML = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([c, ps]) =>
-    `<div class="country-h"><span>${esc(c)}</span><span>${ps.length}</span></div>` +
-    ps.sort((a, b) => a.name.localeCompare(b.name)).map((p) =>
-      `<button class="place" data-id="${esc(p.id)}"><i style="background:${statusOf(p.status).color}"></i><span>${esc(p.name)}</span><small>${esc(whenShort(p))}</small></button>`).join("")
-  ).join("");
+  return { countries: new Set(all.map((p) => p.country).filter(Boolean)).size, places: all.length, photos: await store.countPhotos() };
 }
-$("#filter").addEventListener("click", (e) => { const b = e.target.closest("[data-f]"); if (b) { state.filter = b.dataset.f; renderList(); } });
+const statTiles = (st) => [["Countries", st.countries], ["Places", st.places], ["Photos", st.photos]]
+  .map(([l, n]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join("");
+
+let listTab = "history";
+async function renderList() {
+  const st = await listStats();
+  $("#stats").innerHTML = statTiles(st);
+  document.querySelectorAll("#listTabs [data-tab]").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === listTab));
+  if (listTab === "stats") { $("#places").innerHTML = `<div class="stats stats-tab">${statTiles(st)}</div><p class="empty">More statistics are coming.</p>`; return; }
+  $("#places").innerHTML = historyHTML();
+}
+// History: every trip (month + year) newest first, grouped by year; places without a date at the end
+function historyHTML() {
+  const rows = [];
+  for (const p of state.places.values()) {
+    if (p.visits?.length) for (const v of p.visits) rows.push({ p, y: v.y, m: v.m || 0 });
+    else rows.push({ p, y: 0, m: 0 });
+  }
+  if (!rows.length) return `<p class="empty">No places yet. Click on the map, search, or add photos to stick your first pin.</p>`;
+  rows.sort((a, b) => b.y - a.y || b.m - a.m || a.p.name.localeCompare(b.p.name));
+  let html = "", year = null;
+  for (const r of rows) {
+    if (r.y !== year) {
+      year = r.y;
+      const n = rows.filter((x) => x.y === year).length;
+      html += `<div class="country-h"><span>${year ? year : "No date"}</span><span>${n}</span></div>`;
+    }
+    const month = r.m ? MONTHS[r.m - 1].slice(0, 3) : "";
+    html += `<button class="place hist" data-id="${esc(r.p.id)}"><i></i><span>${esc(r.p.name)}<small>${esc(r.p.country || "")}</small></span><small>${esc(month)}</small></button>`;
+  }
+  return html;
+}
+$("#listTabs").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tab]"); if (!b) return;
+  listTab = b.dataset.tab; renderList();
+});
 $("#places").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-id]"); if (!b) return;
   const p = state.places.get(b.dataset.id);
@@ -928,10 +919,10 @@ const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: 
 function renderResults(text) {
   const r = state.results;
   const row = (it, i) => {
-    const sub = it.mine ? `Your place · ${statusOf(it.status).label}` :
+    const sub = it.mine ? ["Your place", it.country].filter(Boolean).join(" · ") :
       [kindLabel(it.kind), it.country || it.sub?.split(",").slice(-1)[0]?.trim()].filter(Boolean).join(" · ");
     const icon = it.mine ? "●" : ICON[it.kind] || "•";
-    return `<button class="res" role="option" data-n="${i}" aria-selected="${i === state.sel}"><span class="ic" ${it.mine ? `style="color:${statusOf(it.status).color}"` : ""}>${icon}</span><span><b>${esc(it.name)}</b><small>${esc(sub)}</small></span></button>`;
+    return `<button class="res" role="option" data-n="${i}" aria-selected="${i === state.sel}"><span class="ic" ${it.mine ? `style="color:var(--pin-visited)"` : ""}>${icon}</span><span><b>${esc(it.name)}</b><small>${esc(sub)}</small></span></button>`;
   };
   let html = r.length ? r.map(row).join("") : `<p class="res-note">Nothing found in the built-in atlas.</p>`;
   if (state.online === "loading") html += `<p class="res-note">Searching OpenStreetMap…</p>`;
@@ -1015,7 +1006,6 @@ function fmtLL(lon, lat) {
   return `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? "N" : "S"} ${Math.abs(lon).toFixed(2)}°${lon >= 0 ? "E" : "W"}`;
 }
 function whenShort(p) {
-  if (p.status === "wish") return "someday";
   if (!p.visits?.length) return "";
   return fmtVisitShort(p.visits[0]) + (p.visits.length > 1 ? ` +${p.visits.length - 1}` : "");
 }

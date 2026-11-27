@@ -34,8 +34,11 @@
     <div class="panel-head"><h2>My places</h2><button class="x" data-close="list" aria-label="Close">×</button></div>
     <div id="acct" class="acct" hidden></div>
     <div class="stats" id="stats"></div>
-    <div class="chips" id="filter"></div>
-    <div id="places" class="places"></div>
+    <div class="tabs" id="listTabs" role="tablist">
+      <button role="tab" data-tab="history" aria-selected="true">History</button>
+      <button role="tab" data-tab="stats" aria-selected="false">Statistics</button>
+    </div>
+    <div id="places" class="places" role="tabpanel"></div>
     <div class="panel-foot">
       <button id="btnExport" class="btn ghost">Export backup</button>
       <button type="button" class="btn ghost" data-file="fileImport">Import</button>
@@ -48,7 +51,6 @@
       <button class="x" data-close="card" aria-label="Close">×</button>
     </div>
     <p id="cMeta" class="meta"></p>
-    <div class="chips" id="cStatus"></div>
     <div class="visits" id="cVisitsBox">
       <span class="lbl">When</span>
       <div id="cVisits" class="chips"></div>
@@ -97,7 +99,6 @@
     <input id="pName" aria-label="Name of the new place">
     <p id="pMeta" class="meta"></p>
     <button id="pNear" class="near" type="button" hidden></button>
-    <div class="chips" id="pStatus"></div>
     <div class="row"><button id="pCancel" class="btn ghost">Cancel</button><button id="pAdd" class="btn primary">Stick a pin</button></div>
   </div>
 

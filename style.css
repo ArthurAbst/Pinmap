@@ -255,3 +255,13 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .prof-name{border:0;border-bottom:1px dashed var(--line);background:none;font:600 18px/1.3 "Barlow Semi Condensed",var(--ui);padding:2px 0;outline:none;width:100%;color:inherit}
 .prof-name:focus{border-bottom-color:var(--coast)}
 .acct small{margin-top:0}
+
+/* My places tabs */
+.tabs{display:flex;gap:4px;background:light-dark(#eef2f4,#182a37);border-radius:10px;padding:4px}
+.tabs button{flex:1;border:0;background:none;border-radius:8px;height:38px;font-size:15px;font-weight:500;color:var(--ink-soft);cursor:pointer}
+.tabs button[aria-selected=true]{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.place i{background:var(--pin-visited)}
+.place.hist span{display:flex;flex-direction:column;line-height:1.25}
+.place.hist span small{color:var(--ink-soft);font-size:13px}
+.stats-tab{margin-top:4px}
+.near i{background:var(--pin-visited)}
