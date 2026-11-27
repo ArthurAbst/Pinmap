@@ -41,6 +41,11 @@ drop trigger if exists photos_touch on public.photos;
 create trigger photos_touch before insert or update on public.photos
   for each row execute function public.pinmap_touch();
 
+-- Signed-in users may use the tables at all (newer Supabase projects don't grant this by default);
+-- the row-level rules below still limit everyone to their own rows.
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on table public.places, public.photos to authenticated;
+
 -- Everyone sees and changes only their own rows.
 alter table public.places enable row level security;
 alter table public.photos enable row level security;
