@@ -11,8 +11,8 @@ import * as store from "./store.js";
 let remote = null;      // adapter: supabase or the local test fake
 let user = null;
 let status = { state: "off", lastSync: null, error: "" };
-const listeners = { status: [], data: [], prefs: [] };
-let lastPrefs = null;
+const listeners = { status: [], data: [], profile: [] };
+let meta = null;   // the account's metadata: { name, avatar_v }
 const emit = (n, v) => listeners[n].forEach((f) => f(v));
 const setStatus = (s) => { status = { ...status, ...s }; emit("status", { ...status, user }); };
 
@@ -46,8 +46,8 @@ export async function init(cfg) {
 }
 
 export async function signIn(email, password) { user = await remote.signIn(email, password); setStatus({ state: "idle" }); syncNow(); return user; }
-export async function signUp(email, password) {
-  const r = await remote.signUp(email, password);
+export async function signUp(email, password, name = "") {
+  const r = await remote.signUp(email, password, name);
   if (r.session) { user = r.user; setStatus({ state: "idle" }); syncNow(); }
   return r;   // no session → the user must confirm the email first
 }
@@ -55,7 +55,7 @@ export async function signOut() {
   await syncNow().catch(() => {});
   await remote.signOut();
   user = null;
-  lastPrefs = null;
+  meta = null;
   setStatus({ state: "signed-out", lastSync: null });
 }
 
@@ -78,7 +78,7 @@ export function syncNow() {
         await push();
         const changedCount = await pull();
         if (changedCount) emit("data", changedCount);
-        await pullPrefs();
+        await pullMeta();
       } while (again);
       setStatus({ state: "idle", lastSync: new Date(), error: "" });
       downloadThumbs();   // background
@@ -163,15 +163,43 @@ async function pull() {
   return n;
 }
 
-// ---------- account preferences (e.g. the chosen background) ----------
-async function pullPrefs() {
-  const p = await remote.getPrefs().catch(() => null);
-  if (p && JSON.stringify(p) !== JSON.stringify(lastPrefs)) { lastPrefs = p; emit("prefs", p); }
+// ---------- profile: name and avatar (kept in the account, so every device shows them) ----------
+async function pullMeta() {
+  const m = await remote.getMeta().catch(() => null);
+  if (m && JSON.stringify(m) !== JSON.stringify(meta)) { meta = m; emit("profile", profile()); }
 }
-export async function setPrefs(patch) {
-  if (!remote || !user) return;
-  lastPrefs = { ...(lastPrefs || {}), ...patch };
-  await remote.setPrefs(lastPrefs).catch((e) => console.warn("prefs not saved", e));
+export function profile() {
+  if (!user) return null;
+  const m = meta || user.user_metadata || {};
+  return { name: m.name || "", avatarV: m.avatar_v || 0, email: user.email || "" };
+}
+export async function setName(name) {
+  if (!user) return;
+  meta = { ...(meta || user.user_metadata || {}), name };
+  emit("profile", profile());
+  await remote.updateMeta({ name });
+}
+const avatarPath = () => `${user.id}/avatar.jpg`;
+export async function setAvatar(blob) {
+  if (!user) return;
+  await remote.upload(avatarPath(), blob);
+  const v = Date.now();
+  cacheAvatar(v, blob);
+  meta = { ...(meta || user.user_metadata || {}), avatar_v: v };
+  await remote.updateMeta({ avatar_v: v });
+  emit("profile", profile());
+}
+/** The avatar as a data URL (cached on this device per version), or null. */
+export async function avatarURL() {
+  const pr = profile(); if (!pr || !pr.avatarV) return null;
+  const key = `pinmap:avatar:${user.id}`;
+  try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === pr.avatarV) return c.url; } catch { /* ignore */ }
+  try { const b = await remote.download(avatarPath()); return await cacheAvatar(pr.avatarV, b); } catch { return null; }
+}
+async function cacheAvatar(v, blob) {
+  const url = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+  try { localStorage.setItem(`pinmap:avatar:${user.id}`, JSON.stringify({ v, url })); } catch { /* ignore */ }
+  return url;
 }
 
 // ---------- photo files ----------
@@ -208,12 +236,12 @@ function supabaseRemote(url, key) {
     async getUser() { return (await sb.auth.getSession()).data.session?.user || null; },
     onAuth(fn) { sb.auth.onAuthStateChange((_e, s) => fn(s?.user || null)); },
     async signIn(email, password) { return ok(await sb.auth.signInWithPassword({ email, password })).user; },
-    async signUp(email, password) {
-      return ok(await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } }));
+    async signUp(email, password, name) {
+      return ok(await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname, data: { name } } }));
     },
     async signOut() { await sb.auth.signOut(); },
-    async getPrefs() { return (await sb.auth.getUser()).data.user?.user_metadata?.pinmap || null; },
-    async setPrefs(p) { ok(await sb.auth.updateUser({ data: { pinmap: p } })); },
+    async getMeta() { return (await sb.auth.getUser()).data.user?.user_metadata || null; },
+    async updateMeta(patch) { ok(await sb.auth.updateUser({ data: patch })); },   // merged into the existing metadata
     async pull(table, since) {
       const out = [];
       for (let from = 0; ; from += 1000) {

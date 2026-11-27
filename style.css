@@ -243,3 +243,15 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
   .pickbar{top:66px;bottom:auto;left:8px;right:8px;transform:none;max-width:none}
 }
 .bar .btn .count{margin-left:2px}
+
+/* profile */
+.avatar{flex:none;border-radius:50%;background:#3d6f8c center/cover no-repeat;color:#fff;display:grid;place-items:center;font-weight:600;border:0;padding:0}
+.avatar[hidden]{display:none}
+.avatar.big{width:56px;height:56px;font-size:22px;cursor:pointer;position:relative;box-shadow:0 0 0 2px var(--surface),0 0 0 3px var(--line)}
+.avatar.big::after{content:"✎";position:absolute;right:-2px;bottom:-2px;width:20px;height:20px;border-radius:50%;background:var(--surface);color:var(--ink-soft);font-size:11px;display:grid;place-items:center;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.avatar.mini{width:26px;height:26px;font-size:12px;margin-left:-6px}
+.prof{display:flex;align-items:center;gap:12px}
+.prof-text{flex:1;display:flex;flex-direction:column;gap:2px}
+.prof-name{border:0;border-bottom:1px dashed var(--line);background:none;font:600 18px/1.3 "Barlow Semi Condensed",var(--ui);padding:2px 0;outline:none;width:100%;color:inherit}
+.prof-name:focus{border-bottom-color:var(--coast)}
+.acct small{margin-top:0}

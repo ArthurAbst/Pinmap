@@ -40,6 +40,7 @@ const mode = (() => { try { return localStorage.getItem(MODE_KEY) === "flat" ? "
   if (!persistent) toast("Storage is unavailable here — your pins will be lost when the page reloads.", 6000);
   for (const p of await store.allPlaces()) state.places.set(p.id, p);
   sync.on("status", renderAccount);
+  sync.on("profile", () => renderAccount(sync.getStatus(), true));
   sync.on("data", reloadFromStore);
   await sync.init({ url: SUPABASE_URL, key: SUPABASE_KEY, fake: new URLSearchParams(location.search).has("fake") });
   renderAccount(sync.getStatus());
@@ -782,26 +783,69 @@ $("#zView").addEventListener("click", () => {
 });
 
 // ---------------- account & sync ----------------
-function renderAccount(st) {
+// Account block: who you are (avatar, name, email). Sync runs by itself, so its status is
+// only mentioned when something needs attention.
+let acctKey = "";
+function initials(pr) { return ((pr.name || pr.email || "?").trim()[0] || "?").toUpperCase(); }
+async function paintAvatars() {
+  const pr = sync.profile();
+  const url = pr ? await sync.avatarURL() : null;
+  document.querySelectorAll(".avatar").forEach((el) => {
+    el.style.backgroundImage = url ? `url("${url}")` : "";
+    el.textContent = url || !pr ? "" : initials(pr);
+  });
+  const mini = $("#btnList .avatar");
+  if (mini) mini.hidden = !pr;
+}
+function renderAccount(st, force = false) {
   const box = $("#acct");
   if (!sync.available()) { box.hidden = true; return; }
   box.hidden = false;
-  if (!st.user) {
+  const pr = sync.profile();
+  // the status line alone changes often: update it without rebuilding the form
+  const note = !pr ? "" : st.state === "offline" ? "Offline — your changes will sync when you're back online."
+    : st.state === "error" ? "Couldn't sync just now — will try again." : "";
+  const key = pr ? `in:${pr.name}|${pr.email}|${pr.avatarV}` : "out";
+  if (key === acctKey && !force && $("#acctNote")) { $("#acctNote").textContent = note; $("#acctNote").hidden = !note; return; }
+  acctKey = key;
+  if (!pr) {
     box.innerHTML = `<p>Sign in to keep the same map on your phone and computer.</p><button class="btn primary" data-acct="in">Sign in or create account</button>`;
+    paintAvatars();
     return;
   }
-  const time = st.lastSync ? new Date(st.lastSync).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
-  const label = { syncing: "Syncing…", error: "Sync problem — will retry", offline: "Offline — changes will sync later" }[st.state]
-    || (time ? `Synced at ${time}` : "Synced");
-  const dot = st.state === "syncing" ? "busy" : st.state === "error" || st.state === "offline" ? "err" : "ok";
-  box.innerHTML = `<div class="acct-row"><i class="dot ${dot}"></i><span>${esc(label)}</span></div>
-    <small>${esc(st.user.email || "")}</small>${st.state === "error" && st.error ? `<small class="amsg">${esc(st.error)}</small>` : ""}
-    <div class="row"><button class="btn small" data-acct="sync">Sync now</button><button class="linkbtn muted" data-acct="out">Sign out</button></div>`;
+  box.innerHTML = `<div class="prof">
+      <button class="avatar big" data-file="avatarFile" aria-label="Change your photo" title="Change your photo"></button>
+      <div class="prof-text">
+        <input id="profName" class="prof-name" value="${esc(pr.name)}" placeholder="Add your name" aria-label="Your name" maxlength="40">
+        <small>${esc(pr.email)}</small>
+      </div>
+      <button class="linkbtn muted" data-acct="out">Sign out</button>
+    </div>
+    <p id="acctNote" class="amsg" ${note ? "" : "hidden"}>${esc(note)}</p>`;
+  paintAvatars();
 }
+$("#acct").addEventListener("change", (e) => {
+  if (e.target.id !== "profName") return;
+  const v = e.target.value.trim().slice(0, 40);
+  sync.setName(v).then(() => toast(v ? "Name saved" : "Name removed")).catch(() => toast("Couldn't save your name — try again online", 4000));
+});
+$("#acct").addEventListener("keydown", (e) => { if (e.target.id === "profName" && e.key === "Enter") e.target.blur(); });
+$("#avatarFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+  try {
+    // square crop from the centre, 256 px
+    const bmp = await createImageBitmap(f, { imageOrientation: "from-image" });
+    const side = Math.min(bmp.width, bmp.height), c = document.createElement("canvas");
+    c.width = c.height = 256;
+    c.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, 256, 256);
+    const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.86));
+    await sync.setAvatar(blob);
+    toast("Photo updated");
+  } catch { toast("Couldn't update the photo — try another picture or check your connection.", 4000); }
+});
 $("#acct").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-acct]"); if (!b) return;
   if (b.dataset.acct === "in") openAuth();
-  if (b.dataset.acct === "sync") sync.syncNow();
   if (b.dataset.acct === "out") {
     if (b.dataset.armed !== "1") { b.dataset.armed = "1"; b.textContent = "Sign out and clear this device?"; setTimeout(() => { b.dataset.armed = ""; b.textContent = "Sign out"; }, 4000); return; }
     await sync.syncNow();
@@ -824,6 +868,7 @@ function openAuth(mode = "in") {
   $("#aSubmit").textContent = mode === "in" ? "Sign in" : "Create account";
   $("#aSwitch").textContent = mode === "in" ? "No account yet? Create one" : "Already have an account? Sign in";
   $("#aPass").autocomplete = mode === "in" ? "current-password" : "new-password";
+  $("#aNameRow").hidden = mode === "in";
   $("#aMsg").hidden = true;
   $("#auth").hidden = false;
   $("#aEmail").focus();
@@ -840,7 +885,7 @@ $("#authForm").addEventListener("submit", async (e) => {
       await sync.signIn(email, pass);
       closeAuth(); toast("Signed in — syncing your map");
     } else {
-      const r = await sync.signUp(email, pass);
+      const r = await sync.signUp(email, pass, $("#aName").value.trim().slice(0, 40));
       if (r.session) { closeAuth(); toast("Account created — your map is now syncing"); }
       else { msg(`We sent a confirmation link to ${email}. Open it, then sign in here.`); openAuthKeepMsg(); }
     }
@@ -852,7 +897,7 @@ $("#authForm").addEventListener("submit", async (e) => {
 });
 function openAuthKeepMsg() {
   authMode = "in";
-  $("#authTitle").textContent = "Sign in"; $("#aSubmit").textContent = "Sign in";
+  $("#authTitle").textContent = "Sign in"; $("#aSubmit").textContent = "Sign in"; $("#aNameRow").hidden = true;
   $("#aSwitch").textContent = "No account yet? Create one";
 }
 
