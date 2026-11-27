@@ -720,10 +720,16 @@ async function showPeek(id, pinned) {
   $("#pkMeta").textContent = [p.visits?.map(fmtVisit).slice(0, 2).join(", "), p.country].filter(Boolean).join(" · ");
   $("#pkNotes").textContent = (p.notes || "").trim();
   $("#pkNotes").hidden = !p.notes?.trim();
-  const photos = await store.photosOf(id);
+  let photos = await store.photosOf(id);
   if (peek.id !== id) return;
+  // photos trip by trip (newest trip first, photos without a trip last), so the caption
+  // under the picture can name the trip of the photo on screen
+  const order = new Map(p.visits.map((v, i) => [v.id, i]));
+  const rank = (ph) => { const t = tripOf(p, ph); return t ? order.get(t) : 1e9; };
+  photos = photos.map((ph) => ({ ph, r: rank(ph) })).sort((a, b) => a.r - b.r || (a.ph.takenAt || a.ph.addedAt) - (b.ph.takenAt || b.ph.addedAt)).map((x) => x.ph);
   peek.urls.forEach((u) => URL.revokeObjectURL(u));
   peek.photos = photos;
+  peek.place = p;
   peek.urls = [];
   $("#pkTrack").innerHTML = loopOrder(photos.length).map((i) => `<button class="pk-slide" data-i="${i}" aria-label="Open photo ${i + 1}"><img alt=""></button>`).join("");
   photos.forEach(async (ph, i) => {
@@ -758,9 +764,14 @@ function positionPeek() {
   const left = Math.max(12, Math.min(innerWidth - w - 12, x + 7 - w / 2));
   el.style.left = left + "px"; el.style.top = Math.min(innerHeight - h - 12, top) + "px";
 }
+// counter + caption for the photo on screen: its trip (or the month it was taken), and the country
 function updatePeekCount(i = 0) {
-  const n = peek.photos.length;
+  const n = peek.photos.length, p = peek.place, ph = peek.photos[i];
   $("#pkCount").textContent = n > 1 ? `${i + 1} / ${n}` : n === 1 ? "1 photo" : "";
+  if (!p || !ph) return;
+  const t = tripOf(p, ph), v = t && p.visits.find((x) => x.id === t);
+  const when = v ? fmtVisit(v) : ph.takenAt ? fmtVisit({ y: new Date(ph.takenAt).getFullYear(), m: new Date(ph.takenAt).getMonth() + 1 }) : "";
+  $("#pkMeta").textContent = [when, p.country].filter(Boolean).join(" · ");
 }
 $("#pkPrev").addEventListener("click", () => stepTrack($("#pkTrack"), -1));
 $("#pkNext").addEventListener("click", () => stepTrack($("#pkTrack"), 1));
