@@ -264,6 +264,9 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .place.hist span{display:flex;flex-direction:column;line-height:1.25}
 .place.hist span small{color:var(--ink-soft);font-size:13px}
 .stats-tab{margin-top:4px}
+.place.rec>b{font:600 17px/1.2 "Barlow Semi Condensed",var(--ui);white-space:nowrap}
+.place.rec i{display:none}
+.credit{font-size:12px;color:var(--ink-soft);padding:14px 0 4px}
 .near i{background:var(--pin-visited)}
 
 /* trips in the place card */

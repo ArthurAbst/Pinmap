@@ -1,11 +1,12 @@
 // Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
 /* global exifr */
-import { createMap } from "./map.js?v=20261128114801";
-import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128114801";
-import * as store from "./store.js?v=20261128114801";
-import * as sync from "./sync.js?v=20261128114801";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128114801";
-import { createGlobe } from "./globe.js?v=20261128114801";
+import { createMap } from "./map.js?v=20261128120304";
+import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128120304";
+import * as store from "./store.js?v=20261128120304";
+import * as sync from "./sync.js?v=20261128120304";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128120304";
+import { waters, heights, OCEANS } from "./stats.js?v=20261128120304";
+import { createGlobe } from "./globe.js?v=20261128120304";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -43,6 +44,7 @@ const mode = (() => { try { return localStorage.getItem(MODE_KEY) === "flat" ? "
   $("#zView").title = $("#zView").ariaLabel = mode === "globe" ? "Switch to flat map" : "Switch to globe";
   $("#zView").innerHTML = mode === "globe" ? ICON_FLAT : ICON_GLOBE;
   search = createSearch(labels);
+  peakLabels = labels.physical;
   await repairPlaces();
   refresh();
   map.on("moveend", saveView);
@@ -870,12 +872,42 @@ async function listStats() {
 const statTiles = (st) => [["Countries", st.countries], ["Places", st.places], ["Photos", st.photos]]
   .map(([l, n]) => `<div class="stat"><b>${n}</b><span>${l}</span></div>`).join("");
 
-let listTab = "history";
+let listTab = "history", peakLabels = [], statsRender = 0;
+const fmtLat = (lat) => `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? "N" : "S"}`;
+const recRow = (label, p, value) => `<button class="place hist rec" data-id="${esc(p.id)}"><span>${esc(label)}<small>${esc(p.name)}${p.country ? " · " + esc(p.country) : ""}</small></span><b>${esc(value)}</b></button>`;
+// a sea or ocean and the places by it; tapping opens the first place
+const waterRow = (name, ps) => `<button class="place hist rec" data-id="${esc(ps[0].id)}"><span>${esc(name)}<small>${esc(ps.map((p) => p.name).slice(0, 3).join(", "))}${ps.length > 3 ? ` +${ps.length - 3}` : ""}</small></span></button>`;
+// the Statistics tab: the counts, then extremes and waters (these need data files / a lookup, so they fill in after)
+async function statsHTML(st) {
+  const geo = [...state.places.values()].filter((p) => p.status !== "label" && Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  let html = `<div class="stats stats-tab">${statTiles(st)}</div>`;
+  if (!geo.length) return html + `<p class="empty">Stick a few pins to see your records here.</p>`;
+  const north = geo.reduce((a, b) => (b.lat > a.lat ? b : a)), south = geo.reduce((a, b) => (b.lat < a.lat ? b : a));
+  const [w, h] = await Promise.all([waters(geo).catch(() => null), heights(geo, peakLabels).catch(() => new Map())]);
+  html += `<div class="country-h"><span>Records</span></div>` + recRow("Northernmost", north, fmtLat(north.lat)) + recRow("Southernmost", south, fmtLat(south.lat));
+  const top = geo.filter((p) => h.has(p.id)).sort((a, b) => h.get(b.id) - h.get(a.id))[0];
+  html += top ? recRow("Highest", top, `${h.get(top.id).toLocaleString("en-US")} m`) : `<p class="empty">Highest point: couldn't look up heights — check the connection.</p>`;
+  if (w) {
+    const oceans = OCEANS.filter((o) => w.oceans.has(o)), seas = [...w.seas.keys()].sort();
+    html += `<div class="country-h"><span>Oceans</span><span>${oceans.length} of ${OCEANS.length}</span></div>`
+      + (oceans.length ? oceans.map((o) => waterRow(o, w.oceans.get(o))).join("") : `<p class="empty">None yet.</p>`);
+    html += `<div class="country-h"><span>Seas</span><span>${seas.length}</span></div>`
+      + (seas.length ? seas.map((s) => waterRow(s, w.seas.get(s))).join("") : `<p class="empty">None yet.</p>`);
+  }
+  return html + `<p class="credit">A sea or ocean counts if a place is on it or within 10 km of its shore. Heights: Copernicus DEM via Open-Meteo. Seas: Natural Earth.</p>`;
+}
 async function renderList() {
   const st = await listStats();
   $("#stats").innerHTML = statTiles(st);
   document.querySelectorAll("#listTabs [data-tab]").forEach((b) => b.setAttribute("aria-selected", b.dataset.tab === listTab));
-  if (listTab === "stats") { $("#places").innerHTML = `<div class="stats stats-tab">${statTiles(st)}</div><p class="empty">More statistics are coming.</p>`; return; }
+  if (listTab === "stats") {
+    const token = ++statsRender;
+    $("#places").innerHTML = `<div class="stats stats-tab">${statTiles(st)}</div><p class="empty">Counting records, oceans and seas…</p>`;
+    const html = await statsHTML(st);
+    if (token === statsRender && listTab === "stats") $("#places").innerHTML = html;
+    return;
+  }
+  statsRender++;
   $("#places").innerHTML = historyHTML();
 }
 // History: every trip (month + year) newest first, grouped by year; places without a date at the end

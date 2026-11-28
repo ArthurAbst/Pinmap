@@ -7,7 +7,7 @@ B=https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson
 for f in ne_50m_admin_0_countries ne_50m_lakes ne_50m_rivers_lake_centerlines ne_50m_admin_1_states_provinces_lines \
          ne_50m_geography_marine_polys ne_10m_admin_0_countries ne_10m_lakes ne_10m_rivers_lake_centerlines \
          ne_10m_populated_places_simple ne_10m_geography_regions_points ne_10m_geography_regions_elevation_points \
-         ne_10m_geography_regions_polys; do
+         ne_10m_geography_regions_polys ne_10m_geography_marine_polys; do
   [ -f raw/$f.geojson ] || curl -sfL -o raw/$f.geojson $B/$f.geojson
 done
 cp scripts/landmarks.json raw/landmarks.json
@@ -28,3 +28,4 @@ cd raw
 ../$MS -i ne_50m_lakes.geojson -filter 'Boolean(name)' -dissolve fields=name -each 'a=Math.round(this.area/1e6)' -points inner -o format=geojson lakes_pts.geojson
 cd ..
 python3 scripts/build_labels.py raw data tools
+python3 scripts/build_marine.py raw/ne_10m_geography_marine_polys.geojson data/marine.json   # needs: pip install shapely
