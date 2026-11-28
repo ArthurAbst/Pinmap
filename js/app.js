@@ -1,11 +1,11 @@
 // Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
 /* global exifr */
-import { createMap } from "./map.js?v=20261128082837";
-import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128082837";
-import * as store from "./store.js?v=20261128082837";
-import * as sync from "./sync.js?v=20261128082837";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128082837";
-import { createGlobe } from "./globe.js?v=20261128082837";
+import { createMap } from "./map.js?v=20261128114801";
+import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128114801";
+import * as store from "./store.js?v=20261128114801";
+import * as sync from "./sync.js?v=20261128114801";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128114801";
+import { createGlobe } from "./globe.js?v=20261128114801";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -303,13 +303,14 @@ async function photoURL(ph, kind) {
 }
 const monthOptions = (sel) => `<option value="0"${!sel ? " selected" : ""}>Month</option>` + MONTHS.map((m, i) => `<option value="${i + 1}"${sel === i + 1 ? " selected" : ""}>${m}</option>`).join("");
 const yearOptions = (sel) => { let o = ""; for (let y = new Date().getFullYear(); y >= 1950; y--) o += `<option${y === sel ? " selected" : ""}>${y}</option>`; return o; };
-function tripEditor(v) {
+// v: the trip to change; null: a new trip; other: give the photos without a trip a month
+function tripEditor(v, other = false) {
   const now = new Date();
-  return `<div class="trip-edit" data-editing="${v ? esc(v.id) : "new"}">
-    <b class="te-title">${v ? "Change the month of this trip" : "New trip — when was it?"}</b>
+  return `<div class="trip-edit" data-editing="${other ? "other" : v ? esc(v.id) : "new"}">
+    <b class="te-title">${other ? "When were these photos taken?" : v ? "Change the month of this trip" : "New trip — when was it?"}</b>
     <select data-te="m" aria-label="Month">${monthOptions(v ? v.m : now.getMonth() + 1)}</select>
     <select data-te="y" aria-label="Year">${yearOptions(v ? v.y : now.getFullYear())}</select>
-    <div class="row">${v
+    <div class="row">${v || other
       ? `<button class="btn small primary" data-te="save">Save</button>`
       : `<button class="btn small primary" data-te="saveadd">Create &amp; add photos</button><button class="btn small" data-te="save">Create</button>`}
     <button class="linkbtn muted" data-te="cancel">Cancel</button>
@@ -339,9 +340,11 @@ async function renderTrips() {
   }
   const other = by.get(null);
   if (other.length || !p.visits.length) {
-    html += `<section class="trip other" data-v=""><div class="trip-head"><b class="trip-other">${p.visits.length ? "Other photos" : "Photos"}</b>
-      <span class="trip-n">${other.length ? plural(other.length, "photo") : ""}</span></div>
-      <div class="photos">${other.map(tileHTML).join("")}${addTile("", p.visits.length ? "Other photos" : "this place", !other.length)}</div>
+    html += `<section class="trip other" data-v="">` + (editingTrip === "other" ? tripEditor(null, true)
+      : `<div class="trip-head"><b class="trip-other">${p.visits.length ? "Other photos" : "Photos"}</b>
+      <span class="trip-n">${other.length ? plural(other.length, "photo") : ""}</span>
+      ${other.length ? `<button class="linkbtn set-month" data-edit="other" aria-label="Set the month for these photos">Set month <span class="pen" aria-hidden="true">✎</span></button>` : ""}</div>`)
+      + `<div class="photos">${other.map(tileHTML).join("")}${addTile("", p.visits.length ? "Other photos" : "this place", !other.length)}</div>
       <p class="saved">${p.visits.length ? "Photos without a trip. Added here, dated photos go to their month's trip." : "Photos with a date create their trip automatically."}</p></section>`;
   }
   $("#cTrips").innerHTML = html;
@@ -383,6 +386,18 @@ $("#cTrips").addEventListener("click", async (e) => {
   let flash = null;
   if (te.dataset.te === "save" || te.dataset.te === "saveadd") {
     const y = +box.querySelector('[data-te="y"]').value, m = +box.querySelector('[data-te="m"]').value;
+    if (id === "other") {
+      // all photos without a trip go to the trip of this month (created if there isn't one)
+      const v = addVisit(p, { y, m }), moving = cardPhotos.filter((ph) => !tripOf(p, ph));
+      for (const ph of moving) { ph.visitId = v.id; await store.putPhoto(ph); }
+      editingTrip = null;
+      await store.putPlace(p); refresh(); await renderTrips();
+      toast(`${plural(moving.length, "photo")} moved to ${fmtVisit(v)}`);
+      const sec = document.querySelector(`#cTrips [data-v="${CSS.escape(v.id)}"]`);
+      sec?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      sec?.classList.add("flash"); setTimeout(() => sec?.classList.remove("flash"), 1600);
+      return;
+    }
     const clash = p.visits.find((v) => v.y === y && (v.m || 0) === m && v.id !== id);
     if (clash) { toast(`There's already a trip in ${fmtVisit(clash)} — add the photos there`); return; }
     if (id === "new") {
