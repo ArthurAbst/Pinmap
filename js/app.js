@@ -1,12 +1,12 @@
 // Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
 /* global exifr */
-import { createMap } from "./map.js?v=20261128183835";
-import { createSearch, searchOnline, searchAround, kindLabel, zoomFor, norm } from "./search.js?v=20261128183835";
-import * as store from "./store.js?v=20261128183835";
-import * as sync from "./sync.js?v=20261128183835";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128183835";
-import { waters, heights, OCEANS } from "./stats.js?v=20261128183835";
-import { createGlobe } from "./globe.js?v=20261128183835";
+import { createMap } from "./map.js?v=20261128202942";
+import { createSearch, searchOnline, searchAround, kindLabel, zoomFor, norm } from "./search.js?v=20261128202942";
+import * as store from "./store.js?v=20261128202942";
+import * as sync from "./sync.js?v=20261128202942";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128202942";
+import { waters, heights, OCEANS } from "./stats.js?v=20261128202942";
+import { createGlobe } from "./globe.js?v=20261128202942";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -230,9 +230,9 @@ function closePopover() {
 }
 
 // ---- "What's here?": places around the tapped point, to pick from instead of typing ----
-const pick = { items: [], sel: -1, ctrl: null, loading: false, at: null };
+const pick = { items: [], sel: -1, ctrl: null, loading: false, failed: false, at: null, add: null, retry: null };
 const pickCache = new Map();
-const KIND_BONUS = { capital: .5, city: .4, island: .45, islands: .45, "nature park": .3, town: .25, peak: .2, volcano: .25,
+const KIND_BONUS = { capital: .5, city: .4, island: .45, islands: .45, peninsula: .45, isthmus: .3, cape: .2, "nature park": .3, town: .25, peak: .2, volcano: .25,
   waterfall: .2, beach: .15, sight: .15, castle: .2, ruins: .15, temple: .1, lake: .2, village: .1, district: .05 };
 // kilometres per screen pixel at the tapped point
 function kmPerPx(lon, lat) {
@@ -241,7 +241,7 @@ function kmPerPx(lon, lat) {
   return px > 0.01 ? 5.53 / px : 50;
 }
 function pickRank(it, R) {
-  return (it.inside ? 0 : it.km / R) - (it.inside ? 0.6 : 0) - (KIND_BONUS[it.kind] || 0) - (it.notable ? 0.15 : 0)
+  return (it.inside ? 0 : it.km / (it.R || R)) - (it.inside ? 0.6 : 0) - (KIND_BONUS[it.kind] || 0) - (it.notable ? 0.15 : 0)
     - (it.pop ? Math.min(0.3, Math.log10(it.pop + 1) / 25) : 0);
 }
 function mergePick(list, R) {
@@ -263,33 +263,47 @@ async function startPick(d) {
   pick.ctrl?.abort();
   const kpp = kmPerPx(d.lon, d.lat);
   const R = Math.max(1.5, Math.min(60, kpp * 90));            // local data: generous
-  const Ro = Math.max(0.4, Math.min(12, kpp * 50));            // OpenStreetMap: tighter, it is dense
+  const Ro = Math.max(0.4, Math.min(6, kpp * 50));             // OpenStreetMap: tighter, it is dense
   const local = search ? search.around(d.lon, d.lat, R, 20) : [];
   const first = d.name ? [{ name: d.name, kind: d.kind || "", lon: d.lon, lat: d.lat, km: 0, top: true }] : [];
-  pick.at = d; pick.sel = d.name ? 0 : -1;
+  pick.at = d; pick.sel = d.name ? 0 : -1; pick.failed = false;
   pick.items = mergePick([...first, ...local], Ro * 2);
-  pick.loading = navigator.onLine !== false;
   renderPick();
   search?.loadGazetteer("data/gazetteer.json").then(() => {
     if (pick.at !== d) return;
-    pick.items = mergePick([...pick.items, ...search.around(d.lon, d.lat, R, 20)], Ro * 2);
-    renderPick();
+    add(search.around(d.lon, d.lat, R, 20));
   });
-  if (!pick.loading) return;
+  loadOSM(d, Ro);
+  function add(list) {
+    const selName = pick.items[pick.sel]?.nn;
+    pick.items = mergePick([...pick.items, ...list], Ro * 2);
+    pick.sel = selName ? pick.items.findIndex((x) => x.nn === selName) : -1;
+    renderPick();
+  }
+  pick.add = add;
+}
+// both OpenStreetMap queries; results show up as each one arrives
+async function loadOSM(d, Ro) {
+  if (navigator.onLine === false) { pick.loading = false; return; }
   const key = `${d.lon.toFixed(3)},${d.lat.toFixed(3)},${Ro.toFixed(1)}`;
   const ctrl = new AbortController(); pick.ctrl = ctrl;
-  try {
-    let osm = pickCache.get(key);
-    if (!osm) { osm = await searchAround(d.lon, d.lat, Ro, ctrl.signal); pickCache.set(key, osm); }
-    if (pick.at !== d) return;
-    const selName = pick.items[pick.sel]?.nn;
-    pick.items = mergePick([...pick.items, ...osm], Ro * 2);
-    pick.sel = selName ? pick.items.findIndex((x) => x.nn === selName) : -1;
-  } catch (e) {
-    if (e.name === "AbortError") return;
-  }
+  pick.loading = true; pick.failed = false; renderPick();
+  let ok = 0;
+  const run = async (part, req) => {
+    const ck = key + part;
+    try {
+      const list = pickCache.get(ck) || await req;
+      pickCache.set(ck, list); ok++;
+      if (pick.at === d) pick.add(list);
+    } catch (e) { if (e.name === "AbortError") throw e; }
+  };
+  const cached = pickCache.has(key + "geo") && pickCache.has(key + "poi");
+  const q = cached ? {} : searchAround(d.lon, d.lat, Ro, ctrl.signal);
+  q.geo?.catch(() => {}); q.poi?.catch(() => {});
+  try { await Promise.all([run("geo", q.geo), run("poi", q.poi)]); } catch { return; }
   if (pick.at !== d) return;
-  pick.loading = false; renderPick();
+  pick.loading = false; pick.failed = !ok; pick.retry = () => loadOSM(d, Ro);
+  renderPick();
 }
 function renderPick() {
   const box = $("#pList");
@@ -297,7 +311,9 @@ function renderPick() {
     const where = it.inside ? "You're on it" : it.km < 0.05 ? "" : it.km < 1 ? `${Math.round(it.km * 1000 / 10) * 10} m` : `${it.km < 10 ? it.km.toFixed(1) : Math.round(it.km)} km`;
     return `<button class="res" type="button" role="option" data-k="${i}" aria-selected="${i === pick.sel}"><span class="ic">${ICON[it.kind] || "•"}</span><span><b>${esc(it.name)}</b><small>${esc([kindLabel(it.kind), where].filter(Boolean).join(" · "))}</small></span></button>`;
   }).join("");
-  const more = pick.loading ? `<div class="more"><i></i>Looking around…</div>` : pick.items.length ? "" : `<div class="more">Nothing named nearby — type a name below.</div>`;
+  const more = pick.loading ? `<div class="more"><i></i>Looking around…</div>`
+    : pick.failed ? `<div class="more">OpenStreetMap didn't answer. <button class="linkbtn" type="button" data-retry>Retry</button></div>`
+    : pick.items.length ? "" : `<div class="more">Nothing named nearby — type a name below.</div>`;
   box.innerHTML = rows + more;
   positionPopover();
   keepPointVisible();
@@ -310,6 +326,7 @@ function keepPointVisible() {
   map.flyTo(d.lon, d.lat, map.zoomLevel(), 0, (innerHeight - top) / 2);
 }
 $("#pList").addEventListener("click", (e) => {
+  if (e.target.closest("[data-retry]")) return pick.retry?.();
   const b = e.target.closest("[data-k]"); if (!b || !state.draft) return;
   const it = pick.items[+b.dataset.k]; if (!it) return;
   pick.sel = +b.dataset.k;
@@ -1338,7 +1355,7 @@ async function runSearch() {
   state.online = null; state.sel = -1;
   renderResults(text);
 }
-const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: "≈", sea: "≈", lake: "≈", bay: "≈", gulf: "≈", peak: "▲", mountain: "▲", volcano: "▲", range: "⋀", waterfall: "⌇", island: "◌", islands: "◌", desert: "∴", canyon: "⋁", park: "♣", forest: "♣", glacier: "❄",
+const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: "≈", sea: "≈", lake: "≈", bay: "≈", gulf: "≈", peak: "▲", mountain: "▲", volcano: "▲", range: "⋀", waterfall: "⌇", island: "◌", islands: "◌", desert: "∴", canyon: "⋁", park: "♣", forest: "♣", glacier: "❄", peninsula: "◗", isthmus: "◗",
   village: "•", district: "•", beach: "◠", "nature park": "♣", sight: "✦", viewpoint: "◉", museum: "▣", castle: "♜", fort: "♜",
   ruins: "♜", monument: "✦", monastery: "✝", temple: "✦", cave: "◖", cape: "◣", "hot spring": "≈", spring: "≈", lagoon: "≈", "theme park": "✦", zoo: "✦" };
 function renderResults(text) {

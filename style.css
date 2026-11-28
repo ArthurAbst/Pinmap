@@ -253,6 +253,7 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .plist .more{font-size:13px;color:var(--ink-soft);padding:6px 10px;display:flex;align-items:center;gap:8px}
 .plist .more i{width:12px;height:12px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--coast);animation:spin .8s linear infinite;flex:none}
 @keyframes spin{to{transform:rotate(360deg)}}
+.linkbtn{border:0;background:none;color:var(--coast);font:inherit;font-weight:600;padding:6px 4px;cursor:pointer;text-decoration:underline}
 
 @media (max-width:700px){
   /* "where was this photo taken?" sits under the search bar, clear of the bottom sheets */

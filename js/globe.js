@@ -8,7 +8,7 @@
 //   • rivers / province lines only at rest.
 // The public API mirrors js/map.js, so the app works with either.
 /* global d3, topojson */
-import { COLOR_VARS, STYLE, Grid, buildLabelItems, makeCountryAt, shade, pickPin, snapRadius } from "./map.js?v=20261128183835";
+import { COLOR_VARS, STYLE, Grid, buildLabelItems, makeCountryAt, shade, pickPin, snapRadius } from "./map.js?v=20261128202942";
 
 const PIN_COLORS = { visited: "#d8312b", wish: "#e8a317" };
 const DEG = 180 / Math.PI, RAD = Math.PI / 180;

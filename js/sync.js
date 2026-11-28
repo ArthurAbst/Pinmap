@@ -6,7 +6,7 @@
 // Photo files are uploaded with their record and downloaded lazily: thumbnails in the
 // background, full-size images when someone opens them.
 /* global supabase */
-import * as store from "./store.js?v=20261128183835";
+import * as store from "./store.js?v=20261128202942";
 
 let remote = null;      // adapter: supabase or the local test fake
 let user = null;
@@ -24,7 +24,7 @@ export const getStatus = () => ({ ...status, user });
 // ---------- setup ----------
 export async function init(cfg) {
   if (cfg?.fake && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
-    remote = (await import("./remote-fake.js?v=20261128183835")).createFakeRemote();
+    remote = (await import("./remote-fake.js?v=20261128202942")).createFakeRemote();
   } else if (cfg?.url && cfg?.key && window.supabase) {
     remote = supabaseRemote(cfg.url, cfg.key);
   }

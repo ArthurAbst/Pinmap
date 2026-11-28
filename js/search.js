@@ -135,18 +135,24 @@ export async function searchOnline(q) {
   }));
 }
 
-// Named places around a point from OpenStreetMap (Overpass API): villages, beaches, peaks, waterfalls,
-// sights… plus the island / national park the point lies in. English names where OSM has them.
-const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+// Named places around a point from OpenStreetMap (Overpass API), in two light queries that load in
+// parallel: "geo" — islands, peninsulas, capes, plus the island / peninsula / park the point lies in —
+// and "poi" — villages, beaches, peaks, waterfalls, sights close by. English names where OSM has them.
+const OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
 const OSM_KIND = [
   ["place", { city: "city", town: "town", village: "village", hamlet: "village", suburb: "district", quarter: "district", neighbourhood: "district", island: "island", islet: "island", archipelago: "islands", locality: "place" }],
-  ["natural", { beach: "beach", peak: "peak", volcano: "volcano", bay: "bay", cape: "cape", cave_entrance: "cave", glacier: "glacier", hot_spring: "hot spring", spring: "spring", ridge: "ridge", lagoon: "lagoon" }],
+  ["natural", { peninsula: "peninsula", isthmus: "isthmus", beach: "beach", peak: "peak", volcano: "volcano", bay: "bay", cape: "cape", cave_entrance: "cave", glacier: "glacier", hot_spring: "hot spring", ridge: "ridge", lagoon: "lagoon" }],
   ["waterway", { waterfall: "waterfall" }],
   ["tourism", { attraction: "sight", viewpoint: "viewpoint", museum: "museum", theme_park: "theme park", zoo: "zoo" }],
   ["historic", { castle: "castle", fort: "fort", ruins: "ruins", archaeological_site: "ruins", monument: "monument", monastery: "monastery" }],
   ["amenity", { place_of_worship: "temple" }],
   ["boundary", { national_park: "nature park", protected_area: "nature park" }],
-  ["leisure", { nature_reserve: "nature park", park: "park" }],
+  ["leisure", { nature_reserve: "nature park" }],
 ];
 function osmKind(t) {
   for (const [k, map] of OSM_KIND) if (t[k] && map[t[k]]) {
@@ -155,47 +161,69 @@ function osmKind(t) {
   }
   return null;
 }
-export async function searchAround(lon, lat, km, signal) {
-  const r = Math.round(Math.max(300, Math.min(25000, km * 1000)));
-  const a = `(around:${r},${lat.toFixed(5)},${lon.toFixed(5)})`;
-  const q = `[out:json][timeout:10];(
-nwr${a}[name][place~"^(city|town|village|hamlet|suburb|quarter|neighbourhood|island|islet|archipelago|locality)$"];
-nwr${a}[name][natural~"^(beach|peak|volcano|bay|cape|cave_entrance|glacier|hot_spring|ridge|lagoon)$"];
-nwr${a}[name][waterway=waterfall];
-nwr${a}[name][tourism~"^(attraction|viewpoint|museum|theme_park|zoo)$"];
-nwr${a}[name][historic~"^(castle|fort|ruins|archaeological_site|monument|monastery)$"];
-nwr${a}[name][amenity=place_of_worship][wikidata];
-nwr${a}[name][boundary~"^(national_park|protected_area)$"];
-nwr${a}[name][leisure=nature_reserve];
-);out center tags qt 150;
-is_in(${lat.toFixed(5)},${lon.toFixed(5)})->.in;
-area.in[name][place~"^(island|islet|archipelago)$"];out tags;
-area.in[name][boundary=national_park];out tags;`;
-  let lastErr;
-  for (const url of OVERPASS) {
+// One query, sent to the first mirror at once and to the next ones if no answer comes in a few
+// seconds; the first good answer wins. Each try gives up after 9 s, so it never hangs.
+async function overpass(q, signal) {
+  const body = "data=" + encodeURIComponent(q);
+  const ctrls = []; let done = false;
+  const one = async (url) => {
+    const c = new AbortController(); ctrls.push(c);
+    const t = setTimeout(() => c.abort(), 9000);
     try {
-      const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(q), signal,
-        headers: { "Content-Type": "application/x-www-form-urlencoded" } });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const { elements = [] } = await res.json();
-      const kx = Math.cos((lat * Math.PI) / 180) * 111.32;
-      const out = [];
-      for (const el of elements) {
-        const t = el.tags || {};
-        const kind = osmKind(t); if (!kind) continue;
-        const name = t["name:en"] || t.int_name || t.name;
-        const inside = el.type === "area";
-        const x = el.lon ?? el.center?.lon, y = el.lat ?? el.center?.lat;
-        if (!inside && (x == null || y == null)) continue;
-        const d = inside ? 0 : Math.hypot((x - lon) * kx, (y - lat) * 110.57);
-        out.push({ name, kind, lon: inside ? lon : x, lat: inside ? lat : y, km: d, inside, source: "osm",
-          notable: !!(t.wikidata || t.wikipedia) });
-      }
-      return out;
-    } catch (e) {
-      if (e.name === "AbortError") throw e;
-      lastErr = e;
-    }
+      const r = await fetch(url, { method: "POST", body, signal: c.signal, headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json();
+      if (!j.elements?.length && j.remark) throw new Error(j.remark);    // timed out on the server
+      return j;
+    } finally { clearTimeout(t); }
+  };
+  const tries = OVERPASS.map((url, i) => new Promise((res, rej) => {
+    setTimeout(() => (done || signal?.aborted ? rej(new Error("skipped")) : one(url).then(res, rej)), i * 2500);
+  }));
+  const stop = () => ctrls.forEach((c) => c.abort());
+  signal?.addEventListener("abort", stop);
+  try { return await Promise.any(tries); }
+  catch (e) { if (signal?.aborted) throw new DOMException("aborted", "AbortError"); throw e; }
+  finally { done = true; stop(); signal?.removeEventListener("abort", stop); }
+}
+function osmItems(elements, lon, lat, R) {
+  const kx = Math.cos((lat * Math.PI) / 180) * 111.32, out = [];
+  for (const el of elements) {
+    const t = el.tags || {};
+    const kind = osmKind(t); if (!kind) continue;
+    const name = t["name:en"] || t.int_name || t.name;
+    const inside = el.type === "area";
+    const x = el.lon ?? el.center?.lon, y = el.lat ?? el.center?.lat;
+    if (!inside && (x == null || y == null)) continue;
+    const d = inside ? 0 : Math.hypot((x - lon) * kx, (y - lat) * 110.57);
+    out.push({ name, kind, lon: inside ? lon : x, lat: inside ? lat : y, km: d, inside, R, source: "osm", notable: !!(t.wikidata || t.wikipedia) });
   }
-  throw lastErr;
+  return out;
+}
+export function searchAround(lon, lat, km, signal) {
+  const ll = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  const rp = Math.round(Math.max(300, Math.min(6000, km * 1000)));
+  const rg = Math.round(Math.max(8000, Math.min(30000, km * 6000)));
+  const near = (r) => `(around:${r},${ll})`;
+  const geo = `[out:json][timeout:8];(
+node${near(rg)}[name][natural~"^(peninsula|isthmus|cape)$"];
+way${near(rg)}[name][natural=peninsula];
+node${near(rg)}[name][place~"^(island|islet|archipelago)$"];
+);out center tags 60;
+is_in(${ll})->.in;
+area.in[name][place~"^(island|islet|archipelago)$"];out tags;
+area.in[name][natural=peninsula];out tags;
+area.in[name][boundary=national_park];out tags;`;
+  const poi = `[out:json][timeout:8];(
+node${near(rp)}[name][place~"^(city|town|village|hamlet|suburb|quarter|neighbourhood|locality)$"];
+nwr${near(rp)}[name][natural~"^(beach|peak|volcano|bay|cave_entrance|glacier|hot_spring|lagoon)$"];
+nwr${near(rp)}[name][waterway=waterfall];
+nwr${near(rp)}[name][tourism~"^(attraction|viewpoint|museum|theme_park|zoo)$"];
+nwr${near(rp)}[name][historic~"^(castle|fort|ruins|archaeological_site|monastery)$"];
+nwr${near(rp)}[name][amenity=place_of_worship][wikidata];
+);out center tags qt 120;`;
+  return {
+    geo: overpass(geo, signal).then((j) => osmItems(j.elements || [], lon, lat, rg / 1000)),
+    poi: overpass(poi, signal).then((j) => osmItems(j.elements || [], lon, lat, rp / 500)),
+  };
 }
