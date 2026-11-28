@@ -144,7 +144,6 @@ function refresh() {
   const list = [...state.places.values()];
   map.setPins(list);
   map.setVisited(new Set(list.filter((p) => p.a3).map((p) => p.a3)));
-  $("#count").textContent = list.filter((p) => p.status !== "label").length;
   $("#hint").hidden = list.length > 0 || wizOpen();
   if (!$("#list").hidden) renderList();
 }
