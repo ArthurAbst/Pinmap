@@ -16,7 +16,6 @@ const fmtVisit = (v) => (v.m ? MONTHS[v.m - 1] + " " : "") + v.y;
 const fmtVisitShort = (v) => (v.m ? MONTHS[v.m - 1].slice(0, 3) + " " : "") + v.y;
 
 const state = { places: new Map(), current: null, draft: null, filter: "all", results: [], sel: -1, pick: null };
-const imp = { groups: [], urls: [] };
 let map, search;
 
 // ---------------- boot ----------------
@@ -146,7 +145,7 @@ function refresh() {
   map.setPins(list);
   map.setVisited(new Set(list.filter((p) => p.a3).map((p) => p.a3)));
   $("#count").textContent = list.filter((p) => p.status !== "label").length;
-  $("#hint").hidden = list.length > 0 || !!state.pick;
+  $("#hint").hidden = list.length > 0 || wizOpen();
   if (!$("#list").hidden) renderList();
 }
 
@@ -160,7 +159,7 @@ function onHover(h) {
   const tip = $("#tip");
   const single = h && h.list.length === 1;
   // a single pin shows the photo preview (desktop hover); clusters and pick mode keep the tooltip
-  if (single && !state.pick && matchMedia("(hover: hover)").matches) {
+  if (single && !wizOpen() && matchMedia("(hover: hover)").matches) {
     tip.hidden = true;
     clearTimeout(peek.hideTimer);
     clearTimeout(peek.showTimer);
@@ -171,21 +170,23 @@ function onHover(h) {
   clearTimeout(peek.showTimer);
   if (!peek.pinned) peek.hideTimer = setTimeout(() => { if (!peek.over) hidePeek(); }, 300);
   if (!h) { tip.hidden = true; return; }
-  if (single && !state.pick) { tip.hidden = true; return; }   // touch screens: the tap opens the preview
-  tip.textContent = state.pick && single ? `Add photos to “${h.list[0].name}”` : `${h.list.length} places — click to zoom in`;
+  if (single && wizOpen()) tip.textContent = `Add the photos to “${h.list[0].name}”`;
+  else if (single) { tip.hidden = true; return; }   // touch screens: the tap opens the preview
+  else tip.textContent = `${h.list.length} places — click to zoom in`;
   tip.style.left = h.x + 14 + "px"; tip.style.top = h.y + 10 + "px"; tip.hidden = false;
 }
 
 // ---------------- new pin popover ----------------
 function onMapClick({ x, y, lon, lat, feature }) {
+  if (wizOpen()) return wizChoose({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat });
   if (!$("#peek").hidden) { hidePeek(); return; }   // first tap outside just closes the preview
   const country = map.countryAt(lon, lat);
   // missed a pin by a little? offer it in the popover
-  const nearId = state.pick ? null : map.nearestPin?.(x, y, 70);
+  const nearId = map.nearestPin?.(x, y, 70);
   openPopover({ name: feature ? feature.name || feature.t : "", kind: feature ? feature.kind : "", lon, lat, country, source: feature ? "map" : "click", nearId });
 }
 function onPinClick(id) {
-  if (state.pick) return attachAndDrop(state.pick, id).then(() => endPick());
+  if (wizOpen()) return wizChoose({ placeId: id });
   showPeek(id, true);
 }
 
@@ -195,10 +196,8 @@ function onlySheet(keep) {
   if (!isPhone()) return;
   if (keep !== "list" && !$("#list").hidden) toggleList(false);
   if (keep !== "card" && !$("#card").hidden) closeCard();
-  if (keep !== "import") $("#import").hidden = true;   // pending photo groups stay; the camera button brings them back
   if (keep !== "peek") hidePeek();
   if (keep !== "pop" && !$("#pop").hidden) closePopover();
-  updateImportBadge();
 }
 
 function openPopover(d) {
@@ -215,16 +214,15 @@ function openPopover(d) {
     $("#pNear").innerHTML = `<i></i><span>Open <b>${esc(near.name)}</b> instead</span>`;
     $("#pNear").dataset.id = near.id;
   }
-  $("#pAdd").textContent = state.pick ? `Pin it + add ${plural(state.pick.files.length, "photo")}` : "Stick a pin";
+  $("#pAdd").textContent = "Stick a pin";
   map.setTarget([d.lon, d.lat]);
   $("#pop").hidden = false;
-  $("#pickBar").hidden = true;          // the popover itself says the photos will be added
   positionPopover();
   if (!d.name) $("#pName").focus();
 }
 function closePopover() {
-  $("#pop").hidden = true; state.draft = null; map.setTarget(null);
-  if (state.pick) $("#pickBar").hidden = false;
+  $("#pop").hidden = true; state.draft = null;
+  if (!wizOpen()) map.setTarget(null);
 }
 function positionPopover() {
   const pop = $("#pop");
@@ -243,11 +241,7 @@ $("#pAdd").addEventListener("click", async () => {
   const d = state.draft; if (!d) return;
   const p = await createPlace({ name: $("#pName").value, lon: d.lon, lat: d.lat, status: d.status, kind: d.kind, country: d.country, countryName: d.countryName, source: d.source });
   closePopover();
-  if (state.pick) {
-    await attachAndDrop(state.pick, p.id);
-    endPick();
-    if (!imp.groups.length) openCard(p.id);
-  } else openCard(p.id);
+  openCard(p.id);
 });
 
 async function createPlace({ name, lon, lat, status = "visited", kind = "", country, countryName = "", source = "click" }) {
@@ -463,115 +457,200 @@ function visitsOf(metas) {
 }
 const km = (a, b) => Math.hypot((a.lon - b.lon) * Math.cos((a.lat * Math.PI) / 180) * 111.32, (a.lat - b.lat) * 110.57);
 
-async function startImport(files) {
-  files = files.filter(isImage);
-  if (!files.length) return;
-  closeCard(); toggleList(false); closePopover(); hidePeek(); endPick(false);
-  $("#import").hidden = false;
-  $("#importNote").textContent = "";
-  $("#groups").innerHTML = `<p class="empty">Reading ${plural(files.length, "photo")}…</p>`;
-  await search.loadGazetteer("data/gazetteer.json");
-  const metas = await readPhotos(files);
-  const broken = metas.filter((m) => m.broken);
-  const ok = metas.filter((m) => !m.broken);
-  const placesList = [...state.places.values()].filter((p) => p.status !== "label");
+// ---------------- "Add photos" wizard: photos → where → when → save ----------------
+// One linear flow. While it is open, tapping the map or a pin answers "where", and the
+// top search is hidden so there is only one search on screen.
+const wiz = { groups: [], gi: 0, choice: null, trip: null, online: null, urls: [] };
+const wizOpen = () => !$("#wiz").hidden;
+
+// group photos: by GPS (same place within ~12 km, or next to one of your pins), the rest by month
+function groupPhotos(metas) {
+  const mine = [...state.places.values()];
   const groups = [];
-  for (const m of ok) {
+  for (const m of metas) {
     if (m.lat == null) {
       const key = m.date ? `${m.date.getFullYear()}-${m.date.getMonth()}` : "nodate";
       let g = groups.find((g) => g.noLoc === key);
       if (!g) groups.push((g = { noLoc: key, files: [] }));
       g.files.push(m); continue;
     }
-    const near = placesList.map((p) => ({ p, d: km(p, m) })).filter((x) => x.d < 25).sort((a, b) => a.d - b.d)[0];
-    let g = near ? groups.find((g) => g.pinId === near.p.id)
-      : groups.find((g) => !g.pinId && g.lat != null && km(g, m) < 12);
-    if (!g) groups.push((g = near ? { pinId: near.p.id, files: [] } : { lat: m.lat, lon: m.lon, files: [] }));
+    const near = mine.map((p) => ({ p, d: km(p, m) })).filter((x) => x.d < 25).sort((a, b) => a.d - b.d)[0];
+    let g = near ? groups.find((g) => g.pinId === near.p.id) : groups.find((g) => !g.pinId && g.lat != null && km(g, m) < 12);
+    if (!g) groups.push((g = near ? { pinId: near.p.id, lat: m.lat, lon: m.lon, files: [] } : { lat: m.lat, lon: m.lon, files: [] }));
     g.files.push(m);
-    if (!g.pinId) {   // running centroid
-      const n = g.files.length;
-      g.lat += (m.lat - g.lat) / n; g.lon += (m.lon - g.lon) / n;
-    }
+    if (!g.pinId) { const n = g.files.length; g.lat += (m.lat - g.lat) / n; g.lon += (m.lon - g.lon) / n; }
   }
-  for (const g of groups) {
-    g.id = store.uid();
-    g.visits = visitsOf(g.files);
-    if (g.lat != null && !g.pinId) suggest(g);
-  }
-  // groups with a location first, then those that need a decision
-  imp.groups.push(...groups.sort((a, b) => (a.noLoc ? 1 : 0) - (b.noLoc ? 1 : 0)));
-  if (broken.length) toast(`${plural(broken.length, "photo")} couldn't be opened by this browser (HEIC?). Try JPEG.`, 6000);
-  renderGroups();
+  for (const g of groups) { g.visits = visitsOf(g.files); if (g.lat != null && !g.pinId) suggest(g); }
+  return groups.sort((a, b) => (a.noLoc ? 1 : 0) - (b.noLoc ? 1 : 0));
 }
 function suggest(g) {
   const s = search.nearest(g.lon, g.lat, 40);
   const c = map.countryAt(g.lon, g.lat);
   g.country = c; g.countryName = c?.name || s?.country || ""; g.kind = s?.sight ? s.kind : s ? "city" : "";
   g.name = s && (s.sight || s.km < 15) ? s.name : "";
-  g.where = s ? `${s.km < 1.5 ? "In" : "Near"} ${s.name}${g.countryName ? ", " + g.countryName : ""}` : g.countryName ? `Somewhere in ${g.countryName}` : "Location found in photos";
+  g.where = s ? `${s.km < 1.5 ? "In" : "Near"} ${s.name}${g.countryName ? ", " + g.countryName : ""}` : g.countryName ? `Somewhere in ${g.countryName}` : "Location from the photos";
 }
-
 function visitsText(vs) {
   if (!vs?.length) return "";
   const t = vs.slice(0, 3).map(fmtVisit).join(", ");
   return vs.length > 3 ? t + "…" : t;
 }
-function renderGroups() {
-  imp.urls.forEach((u) => URL.revokeObjectURL(u)); imp.urls = [];
-  updateImportBadge();
-  if (!imp.groups.length) { $("#import").hidden = true; return; }
-  const total = imp.groups.reduce((n, g) => n + g.files.length, 0);
-  $("#importNote").textContent = `${plural(total, "photo")} to place. Location and date come from the photos themselves; check and confirm each group.`;
-  const others = [...state.places.values()].filter((p) => p.status !== "label").sort((a, b) => a.name.localeCompare(b.name));
-  $("#groups").innerHTML = imp.groups.map((g) => {
-    const thumbs = g.files.slice(0, 5).map((f) => { const u = URL.createObjectURL(f.thumb); imp.urls.push(u); return `<img src="${u}" alt="">`; }).join("")
-      + (g.files.length > 5 ? `<span>+${g.files.length - 5}</span>` : "");
-    const head = `<div class="strip">${thumbs}</div><b>${plural(g.files.length, "photo")}${g.visits.length ? " · " + esc(visitsText(g.visits)) : ""}</b>`;
-    const skip = `<button class="linkbtn muted" data-act="skip">Skip</button>`;
-    if (g.pinId) {
-      const p = state.places.get(g.pinId);
-      return `<div class="group" data-g="${g.id}">${head}<small>Taken near your place “${esc(p?.name)}”</small>
-        <div class="row"><button class="btn primary" data-act="attach">Add to ${esc(p?.name)}</button><button class="btn ghost" data-act="new">New place</button><button class="linkbtn" data-act="show">Show</button>${skip}</div></div>`;
-    }
-    if (g.lat != null) {
-      return `<div class="group" data-g="${g.id}">${head}<small>${esc(g.where)}</small>
-        <input data-name value="${esc(g.name)}" placeholder="Name this place" aria-label="Place name">
-        <div class="row"><button class="btn primary" data-act="create">Stick a pin</button><button class="linkbtn" data-act="show">Show on map</button>${skip}</div></div>`;
-    }
-    return `<div class="group" data-g="${g.id}">${head}<small>No location saved in these photos</small>
-      <div class="row"><button class="btn primary" data-act="pick">Choose on map</button>${skip}</div>
-      ${others.length ? `<select data-act="to" aria-label="Add to one of your places"><option value="">…or add to one of your places</option>${others.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select>` : ""}</div>`;
-  }).join("");
-}
-const groupById = (id) => imp.groups.find((g) => g.id === id);
-function dropGroup(g) { imp.groups = imp.groups.filter((x) => x !== g); renderGroups(); }
 
-$("#groups").addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-act]"); if (!b || b.tagName === "SELECT") return;
-  const box = b.closest("[data-g]"); const g = groupById(box?.dataset.g); if (!g) return;
-  const act = b.dataset.act;
-  if (act === "skip") return dropGroup(g);
-  if (act === "show") {
-    const c = g.pinId ? state.places.get(g.pinId) : g;
-    map.setTarget([c.lon, c.lat]);
-    return map.flyTo(c.lon, c.lat, 7.5, innerWidth > 700 ? -180 : 0);
+async function wizStart(files) {
+  files = files.filter(isImage);
+  if (!files.length) return;
+  closeCard(); toggleList(false); closePopover(); hidePeek(); closeResults();
+  Object.assign(wiz, { groups: [], gi: 0, choice: null, trip: null, online: null });
+  document.body.classList.add("wizard-on");
+  $("#wiz").hidden = false; $("#hint").hidden = true;
+  $("#wzTitle").textContent = "Add photos";
+  $("#wzBody").innerHTML = `<p class="empty">Reading ${plural(files.length, "photo")}…</p>`;
+  await search.loadGazetteer("data/gazetteer.json");
+  const metas = await readPhotos(files);
+  const broken = metas.filter((m) => m.broken);
+  if (broken.length) toast(`${plural(broken.length, "photo")} couldn't be opened by this browser (HEIC?). Try JPEG.`, 6000);
+  wiz.groups = groupPhotos(metas.filter((m) => !m.broken));
+  if (!wiz.groups.length) return wizClose();
+  wizGroupStart();
+}
+function wizGroupStart() {
+  const g = wiz.groups[wiz.gi];
+  wiz.choice = null; wiz.trip = null; wiz.online = null;
+  // a GPS suggestion is pre-selected, so "where" is answered already (one tap to change)
+  if (g.pinId && state.places.has(g.pinId)) wizChoose({ placeId: g.pinId }, false);
+  else if (g.lat != null) wizChoose({ name: g.name, kind: g.kind, lon: g.lon, lat: g.lat, gps: true }, false);
+  else { map.setTarget(null); renderWiz(); }
+}
+function wizClose() {
+  $("#wiz").hidden = true; $("#wzBody").innerHTML = "";
+  document.body.classList.remove("wizard-on");
+  wiz.urls.forEach((u) => URL.revokeObjectURL(u)); wiz.urls = []; wiz.groups = [];
+  map.setTarget(null); refresh();
+}
+function wizCancel() { if (wizOpen()) { wizClose(); toast("Photos not added"); } }
+
+// "where" answered: an existing place {placeId} or a new spot {name, lon, lat, kind}
+function wizChoose(c, fly = true) {
+  const g = wiz.groups[wiz.gi]; if (!g) return;
+  if (c.placeId) {
+    const p = state.places.get(c.placeId); if (!p) return;
+    wiz.choice = { placeId: p.id, name: p.name, lon: p.lon, lat: p.lat, country: p.country };
+  } else {
+    const country = map.countryAt(c.lon, c.lat);
+    const near = c.name ? null : search.nearest(c.lon, c.lat, 25);
+    wiz.choice = { name: c.name || (near && near.km < 8 ? near.name : ""), kind: c.kind || "", lon: c.lon, lat: c.lat, country: country?.name || c.countryName || "", countryObj: country, gps: c.gps };
   }
-  if (act === "new") {   // detach from the nearby pin, make it its own place
-    const f0 = g.files[0]; delete g.pinId; g.lat = f0.lat; g.lon = f0.lon; suggest(g); return renderGroups();
+  // default trip: the month the photos were taken (an existing trip of that month if there is one)
+  const pv = wiz.choice.placeId && state.places.get(wiz.choice.placeId);
+  const d = g.visits[0];
+  wiz.trip = pv && d ? pv.visits.find((v) => v.y === d.y && v.m === d.m)?.id || null : null;
+  wiz.ym = d ? { y: d.y, m: d.m } : { y: new Date().getFullYear(), m: new Date().getMonth() + 1 };
+  map.setTarget([wiz.choice.lon, wiz.choice.lat]);
+  renderWiz();
+  // show the place in the part of the map the wizard doesn't cover
+  const sheet = $("#wiz");
+  const offX = isPhone() ? 0 : -(sheet.offsetWidth + 14) / 2, offY = isPhone() ? sheet.offsetHeight / 2 : 0;
+  map.flyTo(wiz.choice.lon, wiz.choice.lat, Math.max(map.zoomLevel(), wiz.choice.placeId ? 6 : 7), offX, offY);
+}
+
+function renderWiz() {
+  const g = wiz.groups[wiz.gi]; if (!g) return;
+  const n = wiz.groups.length;
+  $("#wzTitle").textContent = n > 1 ? `Add photos · ${wiz.gi + 1} of ${n}` : "Add photos";
+  wiz.urls.forEach((u) => URL.revokeObjectURL(u)); wiz.urls = [];
+  const thumbs = g.files.slice(0, 5).map((f) => { const u = URL.createObjectURL(f.thumb); wiz.urls.push(u); return `<img src="${u}" alt="">`; }).join("")
+    + (g.files.length > 5 ? `<span>+${g.files.length - 5}</span>` : "");
+  const head = `<div class="strip">${thumbs}</div><p class="wz-sub">${plural(g.files.length, "photo")}${g.visits.length ? " · taken " + esc(visitsText(g.visits)) : ""}</p>`;
+  const c = wiz.choice;
+  let html = head + `<h3 class="wz-q"><span>1</span>Where ${g.files.length === 1 ? "was it" : "were they"} taken?</h3>`;
+  if (c) {
+    html += `<div class="wz-chosen"><i class="pin-dot"></i><div class="wz-chosen-t">${c.placeId
+      ? `<b>${esc(c.name)}</b><small>Your place${c.country ? " · " + esc(c.country) : ""}</small>`
+      : `<input id="wzName" value="${esc(c.name)}" placeholder="Name this place" aria-label="Place name"><small>${c.gps ? "From the photo's location" : "New place"}${c.country ? " · " + esc(c.country) : ""}</small>`}</div>
+      <button class="linkbtn" data-wz="change">Change</button></div>`;
+    html += `<h3 class="wz-q"><span>2</span>When?</h3>`;
+    const p = c.placeId && state.places.get(c.placeId);
+    if (p && p.visits.length) {
+      html += `<div class="chips wz-trips">${p.visits.map((v) => `<button class="chip" data-trip="${esc(v.id)}" aria-pressed="${wiz.trip === v.id}">${esc(fmtVisit(v))}</button>`).join("")}
+        <button class="chip" data-trip="" aria-pressed="${!wiz.trip}">Another month</button></div>`;
+    }
+    if (!wiz.trip) {
+      html += `<div class="wz-when"><select id="wzM" aria-label="Month">${monthOptions(wiz.ym.m)}</select><select id="wzY" aria-label="Year">${yearOptions(wiz.ym.y)}</select></div>`;
+    }
+    html += `<button class="btn primary wz-save" data-wz="save">Save ${plural(g.files.length, "photo")}</button>`;
+  } else {
+    html += `<div class="wz-search"><input id="wzQ" type="search" autocomplete="off" placeholder="Search a city, village, mountain…" aria-label="Search a place"><div id="wzRes" class="wz-res"></div></div>
+      <p class="wz-hint">…or tap the map where it was${state.places.size ? ", or one of your pins" : ""}.</p>`;
+    const mine = [...state.places.values()].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)).slice(0, 8);
+    if (mine.length) html += `<div class="chips">${mine.map((p) => `<button class="chip" data-place="${esc(p.id)}"><i class="pin-dot"></i>${esc(p.name)}</button>`).join("")}</div>`;
   }
-  if (act === "pick") return startPick(g);
-  b.disabled = true;
-  if (act === "attach") { await attachGroup(g, g.pinId); dropGroup(g); }
-  if (act === "create") {
-    const p = await createPlace({ name: box.querySelector("[data-name]").value || g.name, lon: g.lon, lat: g.lat, kind: g.kind, country: g.country, countryName: g.countryName, source: "photo" });
-    await attachGroup(g, p.id); dropGroup(g); map.setTarget(null);
+  if (n > 1) html += `<button class="linkbtn muted wz-skip" data-wz="skip">Skip these photos</button>`;
+  $("#wzBody").innerHTML = html;
+  if (!c && !isPhone()) $("#wzQ")?.focus();
+}
+
+$("#wzBody").addEventListener("click", async (e) => {
+  const t = e.target;
+  const pl = t.closest("[data-place]"); if (pl) return wizChoose({ placeId: pl.dataset.place });
+  const tr = t.closest("[data-trip]");
+  if (tr) {
+    wiz.trip = tr.dataset.trip || null;
+    if (!wiz.trip) { const g = wiz.groups[wiz.gi]; const d = g.visits[0]; wiz.ym = d ? { y: d.y, m: d.m } : wiz.ym; }
+    return renderWiz();
+  }
+  const r = t.closest("[data-r]");
+  if (r) {
+    if (r.dataset.r === "osm") {
+      const text = $("#wzQ").value.trim();
+      wiz.online = "loading"; renderWizResults(text);
+      try { wiz.online = await searchOnline(text); } catch { wiz.online = "Online search isn't reachable right now."; }
+      return renderWizResults(text);
+    }
+    const it = wiz.res[+r.dataset.r];
+    return it.mine ? wizChoose({ placeId: it.id }) : wizChoose({ name: it.name, kind: it.kind, lon: it.lon, lat: it.lat, countryName: it.country });
+  }
+  const b = t.closest("[data-wz]"); if (!b) return;
+  if (b.dataset.wz === "change") { wiz.choice = null; map.setTarget(null); return renderWiz(); }
+  if (b.dataset.wz === "skip") return wizNext();
+  if (b.dataset.wz === "save") {
+    b.disabled = true;
+    const g = wiz.groups[wiz.gi], c = wiz.choice;
+    if (!c.placeId) c.name = $("#wzName").value.trim() || c.name;
+    if (!wiz.trip && $("#wzM")) wiz.ym = { y: +$("#wzY").value, m: +$("#wzM").value };
+    const p = c.placeId ? state.places.get(c.placeId)
+      : await createPlace({ name: c.name, lon: c.lon, lat: c.lat, kind: c.kind, country: c.countryObj, countryName: c.country, source: c.gps ? "photo" : "click" });
+    const tripId = wiz.trip || addVisit(p, wiz.ym).id;
+    await attachGroup(g, p.id, tripId);
+    wiz.lastPlace = p.id;
+    wizNext();
   }
 });
-$("#groups").addEventListener("change", async (e) => {
-  const s = e.target.closest('select[data-act="to"]'); if (!s || !s.value) return;
-  const g = groupById(s.closest("[data-g]").dataset.g);
-  await attachGroup(g, s.value); dropGroup(g);
+let wzTimer;
+$("#wzBody").addEventListener("input", (e) => {
+  if (e.target.id === "wzQ") { clearTimeout(wzTimer); wzTimer = setTimeout(() => { wiz.online = null; renderWizResults(e.target.value.trim()); }, 110); }
 });
+$("#wzBody").addEventListener("change", (e) => {
+  if (e.target.id === "wzM" || e.target.id === "wzY") wiz.ym = { y: +$("#wzY").value, m: +$("#wzM").value };
+  if (e.target.id === "wzName" && wiz.choice) wiz.choice.name = e.target.value.trim();
+});
+function renderWizResults(text) {
+  const box = $("#wzRes"); if (!box) return;
+  if (!text) { box.innerHTML = ""; return; }
+  const mine = [...state.places.values()].map((p) => ({ ...p, mine: true, w: 0, kind: p.kind || "place" }));
+  wiz.res = search.search(text, mine, 6);
+  if (Array.isArray(wiz.online)) wiz.res = wiz.res.concat(wiz.online);
+  box.innerHTML = wiz.res.map((it, i) => `<button class="res" data-r="${i}"><span class="ic">${it.mine ? "●" : ICON[it.kind] || "•"}</span><span><b>${esc(it.name)}</b><small>${esc(it.mine ? "Your place" : [kindLabel(it.kind), it.country].filter(Boolean).join(" · "))}</small></span></button>`).join("")
+    + (wiz.online === "loading" ? `<p class="res-note">Searching OpenStreetMap…</p>`
+      : typeof wiz.online === "string" ? `<p class="res-note">${esc(wiz.online)}</p>`
+      : wiz.online ? "" : `<button class="res res-online" data-r="osm"><span class="ic">⌕</span><span><b>Search OpenStreetMap for “${esc(text)}”</b><small>Villages, streets, viewpoints…</small></span></button>`);
+}
+function wizNext() {
+  wiz.gi++;
+  if (wiz.gi < wiz.groups.length) return wizGroupStart();
+  const last = wiz.lastPlace;
+  wizClose();
+  if (last) openCard(last);
+}
 
 // save a group's photos into a place; dates from the photos become visits
 // toTrip: put every photo into this trip; otherwise each photo goes to the trip of the month
@@ -596,39 +675,9 @@ async function attachGroup(g, placeId, toTrip = null) {
   toast(done ? `${plural(done, "photo")} added to ${trip ? fmtVisit(trip) : p.name}` : "No photos could be saved", 3000);
 }
 
-// "Choose on map" for photos without GPS: next map click / pin click / search result decides
-function startPick(g) {
-  state.pick = g;
-  $("#import").hidden = true; $("#hint").hidden = true;
-  $("#pickText").textContent = `Where ${g.files.length === 1 ? "was this photo" : `were these ${g.files.length} photos`} taken? Click the map, a pin, or search.`;
-  $("#pickBar").hidden = false;
-}
-function endPick(reopen = true) {
-  if (!state.pick) return;
-  state.pick = null;
-  $("#pickBar").hidden = true;
-  if (reopen && imp.groups.length) openImportPanel();
-  updateImportBadge();
-  refresh();
-}
-$("#pickCancel").addEventListener("click", () => { closePopover(); endPick(); });
-// attach a picked group, then remove it from the import list
-async function attachAndDrop(g, id) { await attachGroup(g, id); if (imp.groups.includes(g)) dropGroup(g); }
-
-// photos waiting to be placed: the camera button shows their count and reopens the panel
-function updateImportBadge() {
-  const n = imp.groups.reduce((k, g) => k + g.files.length, 0);
-  const waiting = n > 0 && $("#import").hidden && !state.pick;
-  $("#btnPhotos").dataset.file = waiting ? "" : "importFiles";
-  let b = $("#btnPhotos .count");
-  if (waiting) { if (!b) { b = document.createElement("span"); b.className = "count"; $("#btnPhotos").appendChild(b); } b.textContent = n; }
-  else b?.remove();
-}
-function openImportPanel() { onlySheet("import"); $("#import").hidden = false; updateImportBadge(); }
-$("#btnPhotos").addEventListener("click", () => { if (!$("#btnPhotos").dataset.file && imp.groups.length) openImportPanel(); });
-
 // top-bar button + drag & drop anywhere on the map
-$("#importFiles").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; startImport(f); });
+$("#importFiles").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; wizStart(f); });
+$("#wzClose").addEventListener("click", wizCancel);
 let dragDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
 addEventListener("dragenter", (e) => { if (hasFiles(e)) { dragDepth++; $("#dropzone").hidden = !!e.target.closest?.("#card"); } });
@@ -638,7 +687,7 @@ addEventListener("drop", (e) => {
   dragDepth = 0; $("#dropzone").hidden = true;
   if (!hasFiles(e) || e.target.closest?.("#card")) return;
   e.preventDefault();
-  startImport([...e.dataTransfer.files]);
+  wizStart([...e.dataTransfer.files]);
 });
 
 // ---------------- endless photo strips (preview and full screen) ----------------
@@ -784,7 +833,7 @@ $("#peek").addEventListener("mouseleave", () => { peek.over = false; if (!peek.p
 // ---------------- my places list ----------------
 function toggleList(show = $("#list").hidden) {
   $("#list").hidden = !show; $("#btnList").setAttribute("aria-expanded", show);
-  if (show) { onlySheet("list"); $("#import").hidden = true; renderList(); }
+  if (show) { if (wizOpen()) wizCancel(); onlySheet("list"); renderList(); }
 }
 $("#btnList").addEventListener("click", () => toggleList());
 
@@ -1054,7 +1103,6 @@ $("#results").addEventListener("click", async (e) => {
   const it = i < state.results.length ? state.results[i] : state.online[i - state.results.length];
   closeResults(); q.blur();
   if (it.mine) {
-    if (state.pick) { await attachAndDrop(state.pick, it.id); return endPick(); }
     await openCard(it.id);
     map.flyTo(it.lon, it.lat, Math.max(6, map.zoomLevel()), innerWidth > 700 ? 180 : 0);
     return;
@@ -1077,7 +1125,7 @@ document.addEventListener("click", (e) => {
 // ---------------- global ----------------
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => {
   const w = b.dataset.close;
-  if (w === "card") closeCard(); else if (w === "import") { $("#import").hidden = true; updateImportBadge(); } else if (w === "auth") closeAuth(); else toggleList(false);
+  if (w === "card") closeCard(); else if (w === "auth") closeAuth(); else toggleList(false);
 }));
 $("#zIn").addEventListener("click", () => map.zoomBy(2));
 $("#zOut").addEventListener("click", () => map.zoomBy(0.5));
@@ -1096,7 +1144,7 @@ document.addEventListener("keydown", (e) => {
     if (!$("#auth").hidden) closeAuth();
     else if (!$("#peek").hidden) hidePeek();
     else if (!$("#pop").hidden) closePopover();
-    else if (state.pick) endPick();
+    else if (wizOpen()) wizCancel();
     else if (!$("#card").hidden) closeCard();
   }
 });

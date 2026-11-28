@@ -297,3 +297,29 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .trip-edit{background:light-dark(#fff,#12202b)}
 .trip .saved{margin:2px 0 0}
 @media (prefers-reduced-motion:reduce){.trip{transition:none}}
+
+/* "Add photos" wizard */
+body.wizard-on .search{visibility:hidden}
+.wiz{gap:10px}
+.wz-body{display:flex;flex-direction:column;gap:10px}
+.wz-body .strip{display:flex;gap:4px}
+.wz-body .strip img,.wz-body .strip span{width:56px;height:56px;border-radius:6px;object-fit:cover;flex:none;background:var(--line)}
+.wz-body .strip span{display:grid;place-items:center;font-size:13px;color:var(--ink-soft)}
+.wz-sub{margin:-2px 0 0;font-size:14px;color:var(--ink-soft)}
+.wz-q{margin:6px 0 0;font:600 18px/1.2 "Barlow Semi Condensed",var(--ui);display:flex;align-items:center;gap:8px}
+.wz-q span{width:24px;height:24px;border-radius:50%;background:var(--accent);color:#fff;font-size:14px;display:grid;place-items:center;flex:none}
+.wz-search input{width:100%;height:46px;border:1px solid var(--line);border-radius:10px;padding:0 12px;font-size:16px;background:light-dark(#fbfcfd,#0e1a23);color:inherit;outline:none}
+.wz-search input:focus{border-color:var(--coast)}
+.wz-res{display:flex;flex-direction:column;margin-top:4px}
+.wz-hint{margin:0;font-size:14px;color:var(--ink-soft)}
+.wz-chosen{display:flex;align-items:center;gap:10px;background:light-dark(#f4f7f9,#162733);border-radius:12px;padding:10px 12px}
+.wz-chosen-t{flex:1;display:flex;flex-direction:column;gap:2px}
+.wz-chosen-t b{font-weight:600;font-size:16px}
+.wz-chosen-t input{border:0;border-bottom:1px dashed var(--line);background:none;font:600 16px/1.3 var(--ui);padding:2px 0;outline:none;color:inherit}
+.wz-chosen-t small{font-size:13px;color:var(--ink-soft)}
+.pin-dot{width:12px;height:12px;border-radius:50%;background:var(--pin-visited);flex:none;display:inline-block;box-shadow:inset -2px -2px 3px rgba(0,0,0,.25)}
+.wz-when{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
+.wz-save{height:48px;justify-content:center;font-size:16px;margin-top:4px}
+.wz-skip{align-self:center}
+.wz-trips .chip[aria-pressed=true]{border-color:var(--accent);background:light-dark(#fdf0ef,#3a1f1d)}
+@media (max-width:700px){.wiz{max-height:62vh}}

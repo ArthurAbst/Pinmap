@@ -438,10 +438,11 @@ export function createMap(canvas, { world50, labels, initialView }) {
       const ll = projection.invert([wx, wy]);
       return ll ? { lon: +ll[0].toFixed(3), lat: +ll[1].toFixed(3), z: +ez().toFixed(2) } : null;
     },
-    flyTo(lon, lat, z, offsetX = 0) {
+    // offsetX / offsetY: shift the target off-centre (e.g. to stay clear of an open panel)
+    flyTo(lon, lat, z, offsetX = 0, offsetY = 0) {
       const [wx, wy] = projection([lon, lat]);
       const k = Math.max((256 * 2 ** z) / W0, fitK);
-      const t = d3.zoomIdentity.translate(W / 2 - offsetX, H / 2).scale(k).translate(-wx, -wy);
+      const t = d3.zoomIdentity.translate(W / 2 - offsetX, H / 2 - offsetY).scale(k).translate(-wx, -wy);
       return new Promise((res) => {
         sel.transition().duration(reduceMotion() ? 0 : 1100).call(zoom.transform, t).on("end interrupt", () => res());
       });

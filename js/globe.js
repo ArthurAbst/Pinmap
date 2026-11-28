@@ -455,7 +455,13 @@ export function createGlobe(canvas, { world50, world110, labels, initialView }) 
     countryAt,
     nearestPin(x, y, max = 70) { const h = pickPin(pinHits, placed, x, y, max); return h && h.list.length === 1 ? h.list[0].id : null; },
     getView() { return { lon: +(-rot[0]).toFixed(3), lat: +(-rot[1]).toFixed(3), z: +ez().toFixed(2) }; },
-    flyTo(lon, lat, z) { return animateTo(lon, lat, clampR(Math.max(rOfZ(z), R))); },
+    // offsetY > 0 shows the target above the centre (clear of a bottom sheet)
+    flyTo(lon, lat, z, offsetX = 0, offsetY = 0) {
+      const r1 = clampR(Math.max(rOfZ(z), R));
+      const lat2 = Math.max(-85, Math.min(85, lat - (offsetY / r1) * DEG));
+      const lon2 = lon + (offsetX / r1) * DEG / Math.max(0.2, Math.cos(lat * RAD));
+      return animateTo(lon2, lat2, r1);
+    },
     zoomBy(f) { const c = centre(); return animateTo(c[0], c[1], clampR(R * f), 300); },
     home() { const c = centre(); return animateTo(c[0], c[1], fitR(), 700); },
     setDetail(w) {

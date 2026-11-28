@@ -58,16 +58,10 @@
     <div class="card-foot"><span id="cSaved" class="saved"></span><button id="cDelete" class="btn danger">Delete place</button></div>
   </aside>
 
-  <aside id="import" class="panel left" hidden aria-label="Place your photos">
-    <div class="panel-head"><h2>Place your photos</h2><button class="x" data-close="import" aria-label="Close">×</button></div>
-    <p class="meta" id="importNote"></p>
-    <div id="groups" class="groups"></div>
+  <aside id="wiz" class="panel left wiz" hidden aria-label="Add photos">
+    <div class="panel-head"><h2 id="wzTitle">Add photos</h2><button class="x" id="wzClose" aria-label="Cancel adding photos">×</button></div>
+    <div id="wzBody" class="wz-body"></div>
   </aside>
-
-  <div id="pickBar" class="pickbar" hidden>
-    <span id="pickText"></span>
-    <button id="pickCancel" class="btn small">Cancel</button>
-  </div>
 
   <div id="dropzone" class="dropzone" hidden><div>Drop photos — we'll put them on the map</div></div>
 
