@@ -142,7 +142,11 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .lightbox[hidden]{display:none}
 .lb-track{position:absolute;inset:0;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none}
 .lb-track figure{flex:0 0 100%;min-width:0;height:100%;scroll-snap-align:center;margin:0;display:grid;place-items:center;padding:40px 72px}
-.lb-track img{width:100%;height:100%;object-fit:contain;display:block}
+.lb-track{touch-action:pan-x}
+.lb-track img{width:100%;height:100%;object-fit:contain;display:block;will-change:transform;user-select:none;-webkit-user-drag:none}
+.lightbox.zoomed .lb-track,.lightbox.pinching .lb-track{overflow:hidden;touch-action:none}
+.lightbox.zoomed .lb-track{cursor:grab}
+.lightbox.zoomed .lb-nav,.lightbox.zoomed .lb-bar{opacity:.35}
 .lb-nav,.lb-close{position:absolute;border:0;background:rgba(255,255,255,.12);color:#fff;width:48px;height:48px;border-radius:50%;font-size:28px;cursor:pointer}
 .lb-nav{top:50%;transform:translateY(-50%)}.prev{left:12px}.next{right:12px}
 .lb-close{top:12px;right:12px}
@@ -152,7 +156,8 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
   .bar .btn.ghost{padding:0 12px}
   .panel{left:8px!important;right:8px!important;width:auto;top:auto;bottom:8px;max-height:72vh}
   .bar{top:8px;left:8px;right:8px}
-  .pop{left:8px!important;right:8px;width:auto;top:auto!important;bottom:8px}
+  .pop{left:8px!important;right:8px;width:auto;top:auto!important;bottom:8px;max-height:calc(100dvh - 90px)}
+  .plist{max-height:min(34vh,252px)}
   .credit{display:none}
   .hint{bottom:16px;max-width:calc(100% - 90px);left:12px;transform:none;border-radius:12px}
   .zoomctl{bottom:16px;right:8px}
@@ -237,6 +242,17 @@ textarea{resize:vertical;min-height:120px;line-height:1.5}
 .near[hidden]{display:none}
 .near i{width:10px;height:10px;border-radius:50%;background:var(--pin-visited);flex:none}
 .near b{font-weight:600}
+
+/* "what's here?" — places around the tapped point */
+.ppick-h{margin:0 0 4px;font-size:13px;font-weight:600;color:var(--ink-soft)}
+.plist{display:flex;flex-direction:column;gap:2px;max-height:228px;overflow-y:auto;margin:0 -6px;overscroll-behavior:contain}
+.plist .res{min-height:42px;padding:6px 8px}
+.plist .res[aria-selected=true]{background:light-dark(#e3eef4,#20384a);box-shadow:inset 3px 0 0 var(--coast)}
+.plist .res span:last-child{min-width:0}
+.plist .res b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plist .more{font-size:13px;color:var(--ink-soft);padding:6px 10px;display:flex;align-items:center;gap:8px}
+.plist .more i{width:12px;height:12px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--coast);animation:spin .8s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}
 
 @media (max-width:700px){
   /* "where was this photo taken?" sits under the search bar, clear of the bottom sheets */

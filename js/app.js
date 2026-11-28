@@ -1,12 +1,12 @@
 // Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
 /* global exifr */
-import { createMap } from "./map.js?v=20261128120304";
-import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128120304";
-import * as store from "./store.js?v=20261128120304";
-import * as sync from "./sync.js?v=20261128120304";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128120304";
-import { waters, heights, OCEANS } from "./stats.js?v=20261128120304";
-import { createGlobe } from "./globe.js?v=20261128120304";
+import { createMap } from "./map.js?v=20261128183835";
+import { createSearch, searchOnline, searchAround, kindLabel, zoomFor, norm } from "./search.js?v=20261128183835";
+import * as store from "./store.js?v=20261128183835";
+import * as sync from "./sync.js?v=20261128183835";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128183835";
+import { waters, heights, OCEANS } from "./stats.js?v=20261128183835";
+import { createGlobe } from "./globe.js?v=20261128183835";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -216,15 +216,116 @@ function openPopover(d) {
     $("#pNear").dataset.id = near.id;
   }
   $("#pAdd").textContent = "Stick a pin";
+  $("#pName").placeholder = "…or type a name";
   map.setTarget([d.lon, d.lat]);
   $("#pop").hidden = false;
+  startPick(d);
   positionPopover();
-  if (!d.name) $("#pName").focus();
+  if (!d.name && !isPhone()) $("#pName").focus();
 }
 function closePopover() {
   $("#pop").hidden = true; state.draft = null;
+  pick.ctrl?.abort(); pick.ctrl = null;
   if (!wizOpen()) map.setTarget(null);
 }
+
+// ---- "What's here?": places around the tapped point, to pick from instead of typing ----
+const pick = { items: [], sel: -1, ctrl: null, loading: false, at: null };
+const pickCache = new Map();
+const KIND_BONUS = { capital: .5, city: .4, island: .45, islands: .45, "nature park": .3, town: .25, peak: .2, volcano: .25,
+  waterfall: .2, beach: .15, sight: .15, castle: .2, ruins: .15, temple: .1, lake: .2, village: .1, district: .05 };
+// kilometres per screen pixel at the tapped point
+function kmPerPx(lon, lat) {
+  const a = map.screenOf(lon, lat), b = map.screenOf(lon, lat + 0.05);
+  const px = Math.hypot(a[0] - b[0], a[1] - b[1]);
+  return px > 0.01 ? 5.53 / px : 50;
+}
+function pickRank(it, R) {
+  return (it.inside ? 0 : it.km / R) - (it.inside ? 0.6 : 0) - (KIND_BONUS[it.kind] || 0) - (it.notable ? 0.15 : 0)
+    - (it.pop ? Math.min(0.3, Math.log10(it.pop + 1) / 25) : 0);
+}
+function mergePick(list, R) {
+  const out = [];
+  for (const it of list) {
+    const nn = norm(it.name);
+    if (!nn) continue;
+    const dup = out.find((o) => o.nn === nn && (o.inside || it.inside || Math.abs(o.lon - it.lon) + Math.abs(o.lat - it.lat) < 0.08));
+    if (dup) {
+      if (it.inside && !dup.inside) Object.assign(dup, { inside: true, kind: it.kind });   // "Ko Pha-ngan": the island, not the town
+      dup.notable ||= it.notable; continue;
+    }
+    out.push({ ...it, nn });
+  }
+  for (const it of out) it.r = it.top ? -9 : pickRank(it, R);
+  return out.sort((a, b) => a.r - b.r).slice(0, 12);
+}
+async function startPick(d) {
+  pick.ctrl?.abort();
+  const kpp = kmPerPx(d.lon, d.lat);
+  const R = Math.max(1.5, Math.min(60, kpp * 90));            // local data: generous
+  const Ro = Math.max(0.4, Math.min(12, kpp * 50));            // OpenStreetMap: tighter, it is dense
+  const local = search ? search.around(d.lon, d.lat, R, 20) : [];
+  const first = d.name ? [{ name: d.name, kind: d.kind || "", lon: d.lon, lat: d.lat, km: 0, top: true }] : [];
+  pick.at = d; pick.sel = d.name ? 0 : -1;
+  pick.items = mergePick([...first, ...local], Ro * 2);
+  pick.loading = navigator.onLine !== false;
+  renderPick();
+  search?.loadGazetteer("data/gazetteer.json").then(() => {
+    if (pick.at !== d) return;
+    pick.items = mergePick([...pick.items, ...search.around(d.lon, d.lat, R, 20)], Ro * 2);
+    renderPick();
+  });
+  if (!pick.loading) return;
+  const key = `${d.lon.toFixed(3)},${d.lat.toFixed(3)},${Ro.toFixed(1)}`;
+  const ctrl = new AbortController(); pick.ctrl = ctrl;
+  try {
+    let osm = pickCache.get(key);
+    if (!osm) { osm = await searchAround(d.lon, d.lat, Ro, ctrl.signal); pickCache.set(key, osm); }
+    if (pick.at !== d) return;
+    const selName = pick.items[pick.sel]?.nn;
+    pick.items = mergePick([...pick.items, ...osm], Ro * 2);
+    pick.sel = selName ? pick.items.findIndex((x) => x.nn === selName) : -1;
+  } catch (e) {
+    if (e.name === "AbortError") return;
+  }
+  if (pick.at !== d) return;
+  pick.loading = false; renderPick();
+}
+function renderPick() {
+  const box = $("#pList");
+  const rows = pick.items.map((it, i) => {
+    const where = it.inside ? "You're on it" : it.km < 0.05 ? "" : it.km < 1 ? `${Math.round(it.km * 1000 / 10) * 10} m` : `${it.km < 10 ? it.km.toFixed(1) : Math.round(it.km)} km`;
+    return `<button class="res" type="button" role="option" data-k="${i}" aria-selected="${i === pick.sel}"><span class="ic">${ICON[it.kind] || "•"}</span><span><b>${esc(it.name)}</b><small>${esc([kindLabel(it.kind), where].filter(Boolean).join(" · "))}</small></span></button>`;
+  }).join("");
+  const more = pick.loading ? `<div class="more"><i></i>Looking around…</div>` : pick.items.length ? "" : `<div class="more">Nothing named nearby — type a name below.</div>`;
+  box.innerHTML = rows + more;
+  positionPopover();
+  keepPointVisible();
+}
+// phone: the sheet covers the bottom of the map — slide the map so the tapped point stays in view
+function keepPointVisible() {
+  const d = state.draft; if (!d || !isPhone() || $("#pop").hidden) return;
+  const top = $("#pop").getBoundingClientRect().top, [, y] = map.screenOf(d.lon, d.lat);
+  if (y > 70 && y < top - 40) return;
+  map.flyTo(d.lon, d.lat, map.zoomLevel(), 0, (innerHeight - top) / 2);
+}
+$("#pList").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-k]"); if (!b || !state.draft) return;
+  const it = pick.items[+b.dataset.k]; if (!it) return;
+  pick.sel = +b.dataset.k;
+  $("#pName").value = it.name;
+  // the pin goes where the place is (an island or park you are "on" keeps the tapped point)
+  const at = it.inside ? pick.at : it;
+  Object.assign(state.draft, { name: it.name, kind: it.kind || "", lon: at.lon, lat: at.lat });
+  state.draft.country = map.countryAt(at.lon, at.lat) || state.draft.country;
+  $("#pMeta").textContent = [state.draft.country?.name || state.draft.countryName || "", fmtLL(at.lon, at.lat)].filter(Boolean).join(" · ");
+  map.setTarget([at.lon, at.lat]);
+  selPick(); keepPointVisible();
+});
+function selPick() { document.querySelectorAll("#pList [data-k]").forEach((x) => x.setAttribute("aria-selected", +x.dataset.k === pick.sel)); }
+$("#pName").addEventListener("input", () => {
+  if (pick.sel >= 0 && norm($("#pName").value) !== pick.items[pick.sel]?.nn) { pick.sel = -1; selPick(); }
+});
 function positionPopover() {
   const pop = $("#pop");
   if (pop.hidden || !state.draft || innerWidth <= 700) return;
@@ -761,7 +862,8 @@ function openLightbox(photos, i, placeId = null) {
     $("#lightbox").requestFullscreen({ navigationUI: "hide" }).catch(() => {});
   }
   $("#lbPrev").hidden = $("#lbNext").hidden = photos.length < 2;
-  loopTrack(track, photos.length, i, (k) => { lb.idx = k; syncLbTrip(); });
+  zmReset();
+  loopTrack(track, photos.length, i, (k) => { if (k !== lb.idx) zmReset(); lb.idx = k; syncLbTrip(); });
   $("#lbClose").focus();
 }
 function syncLbTrip() {
@@ -778,12 +880,127 @@ $("#lbTrip").addEventListener("change", async () => {
 // leaving full screen (e.g. the phone's back gesture) also closes the viewer
 document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && !$("#lightbox").hidden) closeLightbox(); });
 function closeLightbox() {
+  zmReset();
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   $("#lightbox").hidden = true; $("#lbTrack")._off?.(); $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
-function lbStep(d) { stepTrack($("#lbTrack"), d); }
+function lbStep(d) { zmReset(); stepTrack($("#lbTrack"), d); }
 $("#lbPrev").addEventListener("click", () => lbStep(-1));
 $("#lbNext").addEventListener("click", () => lbStep(1));
 $("#lbClose").addEventListener("click", closeLightbox);
+
+// ---- zoom in the viewer: pinch or double-tap on phones, wheel or double-click with a mouse;
+// while zoomed in, one finger (or the mouse) moves the photo instead of flipping to the next one
+const zm = { s: 1, x: 0, y: 0, img: null };
+function lbImg() {
+  const t = $("#lbTrack"), k = Math.round(t.scrollLeft / (t.clientWidth || 1));
+  return t.children[k]?.querySelector("img") || null;
+}
+// the visible picture inside the <img> box (object-fit: contain leaves bars around it)
+function zmBox(img) {
+  const W = img.clientWidth, H = img.clientHeight, r = (img.naturalWidth || W) / (img.naturalHeight || H);
+  const cw = Math.min(W, H * r), ch = Math.min(H, W / r);
+  return { W, H, cw, ch, ox: (W - cw) / 2, oy: (H - ch) / 2 };
+}
+function zmClamp() {
+  const b = zmBox(zm.img);
+  const fit = (t, size, c, o) => {
+    const lo = size - zm.s * (o + c), hi = -zm.s * o;           // content edges must cover the box
+    return zm.s * c <= size ? (size - zm.s * c) / 2 - zm.s * o : Math.min(hi, Math.max(lo, t));
+  };
+  zm.x = fit(zm.x, b.W, b.cw, b.ox); zm.y = fit(zm.y, b.H, b.ch, b.oy);
+}
+function zmApply(anim) {
+  const img = zm.img; if (!img) return;
+  img.style.transition = anim ? "transform .22s ease" : "none";
+  img.style.transformOrigin = "0 0";
+  img.style.transform = zm.s > 1 ? `translate(${zm.x}px,${zm.y}px) scale(${zm.s})` : "";
+  $("#lightbox").classList.toggle("zoomed", zm.s > 1);
+}
+function zmReset(anim) {
+  if (zm.img) { zm.s = 1; zm.x = zm.y = 0; zmApply(anim); }
+  zm.img = null; $("#lightbox").classList.remove("zoomed", "pinching");
+}
+// scale to s around the screen point (cx, cy)
+function zmTo(s, cx, cy, anim) {
+  zm.img ||= lbImg(); if (!zm.img) return;
+  const r = zm.img.getBoundingClientRect();                     // includes the current transform
+  const ix = (cx - r.left) / zm.s, iy = (cy - r.top) / zm.s;    // point in unscaled image coords
+  const s0 = zm.s;
+  zm.s = Math.max(1, Math.min(6, s));
+  zm.x += ix * (s0 - zm.s); zm.y += iy * (s0 - zm.s);
+  if (zm.s <= 1.01) { zm.s = 1; zm.x = zm.y = 0; }
+  zmClamp(); zmApply(anim);
+}
+const zmToggle = (cx, cy) => (zm.s > 1 ? zmTo(1, cx, cy, true) : zmTo(2.5, cx, cy, true));
+{
+  const track = $("#lbTrack");
+  let pinch = null, pan = null, lastTap = { t: 0, x: 0, y: 0 }, moved = false;
+  const mid = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+  const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+  track.addEventListener("touchstart", (e) => {
+    moved = false;
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      zm.img ||= lbImg(); if (!zm.img) return;
+      $("#lightbox").classList.add("pinching");                  // stop the strip from scrolling
+      pinch = { d: dist(e.touches[0], e.touches[1]), m: mid(e.touches[0], e.touches[1]), s: zm.s };
+      pan = null;
+    } else if (e.touches.length === 1 && zm.s > 1) {
+      e.preventDefault();
+      pan = { x: e.touches[0].clientX, y: e.touches[0].clientY, zx: zm.x, zy: zm.y };
+    }
+  }, { passive: false });
+  track.addEventListener("touchmove", (e) => {
+    moved = true;
+    if (pinch && e.touches.length >= 2) {
+      e.preventDefault();
+      const m = mid(e.touches[0], e.touches[1]);
+      zmTo(pinch.s * dist(e.touches[0], e.touches[1]) / pinch.d, pinch.m.x, pinch.m.y);
+      zm.x += m.x - pinch.m.x; zm.y += m.y - pinch.m.y;           // two fingers also drag
+      pinch.m = m; zmClamp(); zmApply();
+    } else if (pan && e.touches.length === 1) {
+      e.preventDefault();
+      zm.x = pan.zx + e.touches[0].clientX - pan.x; zm.y = pan.zy + e.touches[0].clientY - pan.y;
+      zmClamp(); zmApply();
+    }
+  }, { passive: false });
+  track.addEventListener("touchend", (e) => {
+    if (pinch && e.touches.length < 2) {
+      pinch = null;
+      $("#lightbox").classList.remove("pinching");
+      if (zm.s <= 1) zmReset(true);
+      if (e.touches.length === 1 && zm.s > 1) pan = { x: e.touches[0].clientX, y: e.touches[0].clientY, zx: zm.x, zy: zm.y };
+      lastTap.t = 0; return;
+    }
+    if (!e.touches.length) pan = null;
+    // double tap
+    const t = e.changedTouches[0];
+    if (moved || e.touches.length || !t) return;
+    const now = performance.now();
+    if (now - lastTap.t < 320 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 40) {
+      e.preventDefault(); zmToggle(t.clientX, t.clientY); lastTap.t = 0;
+    } else lastTap = { t: now, x: t.clientX, y: t.clientY };
+  }, { passive: false });
+  // mouse
+  track.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zmTo(zm.s * Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0022)), e.clientX, e.clientY);
+  }, { passive: false });
+  track.addEventListener("dblclick", (e) => { if (e.pointerType !== "touch") zmToggle(e.clientX, e.clientY); });
+  let drag = null;
+  track.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "mouse" || zm.s <= 1) return;
+    e.preventDefault(); drag = { x: e.clientX, y: e.clientY, zx: zm.x, zy: zm.y }; track.setPointerCapture(e.pointerId);
+  });
+  track.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    zm.x = drag.zx + e.clientX - drag.x; zm.y = drag.zy + e.clientY - drag.y; zmClamp(); zmApply();
+  });
+  const endDrag = () => { drag = null; };
+  track.addEventListener("pointerup", endDrag); track.addEventListener("pointercancel", endDrag);
+  // a new photo on screen starts unzoomed; so does a rotated phone
+  addEventListener("resize", () => { if (!$("#lightbox").hidden) zmReset(); });
+}
 
 // ---------------- pin preview ("peek"): photos at a glance ----------------
 const peek = { id: null, pinned: false, over: false, photos: [], urls: [], showTimer: 0, hideTimer: 0 };
@@ -1121,7 +1338,9 @@ async function runSearch() {
   state.online = null; state.sel = -1;
   renderResults(text);
 }
-const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: "≈", sea: "≈", lake: "≈", bay: "≈", gulf: "≈", peak: "▲", mountain: "▲", volcano: "▲", range: "⋀", waterfall: "⌇", island: "◌", islands: "◌", desert: "∴", canyon: "⋁", park: "♣", forest: "♣", glacier: "❄" };
+const ICON = { country: "▦", capital: "★", city: "●", town: "•", ocean: "≈", sea: "≈", lake: "≈", bay: "≈", gulf: "≈", peak: "▲", mountain: "▲", volcano: "▲", range: "⋀", waterfall: "⌇", island: "◌", islands: "◌", desert: "∴", canyon: "⋁", park: "♣", forest: "♣", glacier: "❄",
+  village: "•", district: "•", beach: "◠", "nature park": "♣", sight: "✦", viewpoint: "◉", museum: "▣", castle: "♜", fort: "♜",
+  ruins: "♜", monument: "✦", monastery: "✝", temple: "✦", cave: "◖", cape: "◣", "hot spring": "≈", spring: "≈", lagoon: "≈", "theme park": "✦", zoo: "✦" };
 function renderResults(text) {
   const r = state.results;
   const row = (it, i) => {

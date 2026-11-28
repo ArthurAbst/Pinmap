@@ -100,7 +100,23 @@ export function createSearch(L) {
     return best;
   }
 
-  return { search, loadGazetteer, nearest, countryName: (cc) => iso[cc] || "" };
+  // Everything named within maxKm of a point (for "what's here?" after a tap on the map), closest first.
+  // Seas, oceans and countries are left out: they are too big to be "here".
+  const SKIP = new Set(["country", "ocean", "sea"]);
+  function around(lon, lat, maxKm = 20, limit = 12) {
+    const kx = Math.cos((lat * Math.PI) / 180) * 111.32, ky = 110.57;
+    const out = [];
+    for (const it of items) {
+      if (SKIP.has(it.kind)) continue;
+      const dx = (it.lon - lon) * kx, dy = (it.lat - lat) * ky;
+      if (Math.abs(dx) > maxKm || Math.abs(dy) > maxKm) continue;
+      const d = Math.hypot(dx, dy);
+      if (d <= maxKm) out.push({ ...it, km: d, rank: d / maxKm - Math.min(it.w, 90) / 300 });
+    }
+    return out.sort((a, b) => a.rank - b.rank).slice(0, limit);
+  }
+
+  return { search, loadGazetteer, nearest, around, countryName: (cc) => iso[cc] || "" };
 }
 
 export async function searchOnline(q) {
@@ -117,4 +133,69 @@ export async function searchOnline(q) {
     country: x.address?.country || "",
     lon: +x.lon, lat: +x.lat, source: "osm",
   }));
+}
+
+// Named places around a point from OpenStreetMap (Overpass API): villages, beaches, peaks, waterfalls,
+// sights… plus the island / national park the point lies in. English names where OSM has them.
+const OVERPASS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"];
+const OSM_KIND = [
+  ["place", { city: "city", town: "town", village: "village", hamlet: "village", suburb: "district", quarter: "district", neighbourhood: "district", island: "island", islet: "island", archipelago: "islands", locality: "place" }],
+  ["natural", { beach: "beach", peak: "peak", volcano: "volcano", bay: "bay", cape: "cape", cave_entrance: "cave", glacier: "glacier", hot_spring: "hot spring", spring: "spring", ridge: "ridge", lagoon: "lagoon" }],
+  ["waterway", { waterfall: "waterfall" }],
+  ["tourism", { attraction: "sight", viewpoint: "viewpoint", museum: "museum", theme_park: "theme park", zoo: "zoo" }],
+  ["historic", { castle: "castle", fort: "fort", ruins: "ruins", archaeological_site: "ruins", monument: "monument", monastery: "monastery" }],
+  ["amenity", { place_of_worship: "temple" }],
+  ["boundary", { national_park: "nature park", protected_area: "nature park" }],
+  ["leisure", { nature_reserve: "nature park", park: "park" }],
+];
+function osmKind(t) {
+  for (const [k, map] of OSM_KIND) if (t[k] && map[t[k]]) {
+    if (k === "amenity" && !(t.tourism || t.historic || t.wikidata)) return null; // only notable temples
+    return map[t[k]];
+  }
+  return null;
+}
+export async function searchAround(lon, lat, km, signal) {
+  const r = Math.round(Math.max(300, Math.min(25000, km * 1000)));
+  const a = `(around:${r},${lat.toFixed(5)},${lon.toFixed(5)})`;
+  const q = `[out:json][timeout:10];(
+nwr${a}[name][place~"^(city|town|village|hamlet|suburb|quarter|neighbourhood|island|islet|archipelago|locality)$"];
+nwr${a}[name][natural~"^(beach|peak|volcano|bay|cape|cave_entrance|glacier|hot_spring|ridge|lagoon)$"];
+nwr${a}[name][waterway=waterfall];
+nwr${a}[name][tourism~"^(attraction|viewpoint|museum|theme_park|zoo)$"];
+nwr${a}[name][historic~"^(castle|fort|ruins|archaeological_site|monument|monastery)$"];
+nwr${a}[name][amenity=place_of_worship][wikidata];
+nwr${a}[name][boundary~"^(national_park|protected_area)$"];
+nwr${a}[name][leisure=nature_reserve];
+);out center tags qt 150;
+is_in(${lat.toFixed(5)},${lon.toFixed(5)})->.in;
+area.in[name][place~"^(island|islet|archipelago)$"];out tags;
+area.in[name][boundary=national_park];out tags;`;
+  let lastErr;
+  for (const url of OVERPASS) {
+    try {
+      const res = await fetch(url, { method: "POST", body: "data=" + encodeURIComponent(q), signal,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const { elements = [] } = await res.json();
+      const kx = Math.cos((lat * Math.PI) / 180) * 111.32;
+      const out = [];
+      for (const el of elements) {
+        const t = el.tags || {};
+        const kind = osmKind(t); if (!kind) continue;
+        const name = t["name:en"] || t.int_name || t.name;
+        const inside = el.type === "area";
+        const x = el.lon ?? el.center?.lon, y = el.lat ?? el.center?.lat;
+        if (!inside && (x == null || y == null)) continue;
+        const d = inside ? 0 : Math.hypot((x - lon) * kx, (y - lat) * 110.57);
+        out.push({ name, kind, lon: inside ? lon : x, lat: inside ? lat : y, km: d, inside, source: "osm",
+          notable: !!(t.wikidata || t.wikipedia) });
+      }
+      return out;
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
