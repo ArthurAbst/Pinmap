@@ -1,11 +1,11 @@
 // Pinmap — app wiring: map, search, pins, place cards, photos, photo import, backup.
 /* global exifr */
-import { createMap } from "./map.js";
-import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js";
-import * as store from "./store.js";
-import * as sync from "./sync.js";
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
-import { createGlobe } from "./globe.js";
+import { createMap } from "./map.js?v=20261128082837";
+import { createSearch, searchOnline, kindLabel, zoomFor } from "./search.js?v=20261128082837";
+import * as store from "./store.js?v=20261128082837";
+import * as sync from "./sync.js?v=20261128082837";
+import { SUPABASE_URL, SUPABASE_KEY } from "./config.js?v=20261128082837";
+import { createGlobe } from "./globe.js?v=20261128082837";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

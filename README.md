@@ -75,6 +75,10 @@ data/gazetteer.json — населённые пункты для поиска (G
 scripts/build_labels.py — сборка labels.json и gazetteer.json
 ```
 
+## Выпуск обновления
+
+Перед каждым коммитом: `python3 scripts/bump_version.py` — ставит новый `?v=…` на style.css, app.js и все импорты модулей, чтобы браузер не смешивал новые файлы со старыми из кэша (GitHub Pages кэширует ~10 минут).
+
 ## Пересборка данных
 
 ```bash
