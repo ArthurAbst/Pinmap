@@ -712,7 +712,11 @@ function loopTrack(track, n, start, onIndex) {
   const onScroll = () => { onIndex?.(real()); clearTimeout(timer); timer = setTimeout(settle, 140); };
   track.addEventListener("scroll", onScroll, { passive: true });
   track.addEventListener("scrollend", settle);
-  track._off = () => { track.removeEventListener("scroll", onScroll); track.removeEventListener("scrollend", settle); clearTimeout(timer); };
+  let cur = start;
+  onIndex = ((orig) => (i) => { cur = i; orig?.(i); })(onIndex);
+  const ro = new ResizeObserver(() => { track.scrollLeft = (cur + (n > 1 ? 1 : 0)) * w(); });
+  ro.observe(track);
+  track._off = () => { track.removeEventListener("scroll", onScroll); track.removeEventListener("scrollend", settle); clearTimeout(timer); ro.disconnect(); };
   requestAnimationFrame(() => { track.scrollLeft = (start + (n > 1 ? 1 : 0)) * w(); onIndex?.(start); });
 }
 const stepTrack = (track, d) => track.scrollBy({ left: d * track.clientWidth, behavior: "smooth" });
@@ -736,6 +740,10 @@ function openLightbox(photos, i, placeId = null) {
     track.querySelectorAll(`[data-i="${j}"] img`).forEach((img) => { img.src = u; });
   });
   $("#lightbox").hidden = false;
+  // on phones, hide the browser's own bars too (needs the tap that opened the viewer)
+  if (isPhone() && $("#lightbox").requestFullscreen && !document.fullscreenElement) {
+    $("#lightbox").requestFullscreen({ navigationUI: "hide" }).catch(() => {});
+  }
   $("#lbPrev").hidden = $("#lbNext").hidden = photos.length < 2;
   loopTrack(track, photos.length, i, (k) => { lb.idx = k; syncLbTrip(); });
   $("#lbClose").focus();
@@ -751,7 +759,11 @@ $("#lbTrip").addEventListener("change", async () => {
   toast($("#lbTrip").value === "none" ? "Photo moved to Other photos" : `Photo moved to ${$("#lbTrip").selectedOptions[0].text}`);
   if (state.current === lb.placeId) renderTrips();
 });
-function closeLightbox() { $("#lightbox").hidden = true; $("#lbTrack")._off?.(); $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
+// leaving full screen (e.g. the phone's back gesture) also closes the viewer
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && !$("#lightbox").hidden) closeLightbox(); });
+function closeLightbox() {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  $("#lightbox").hidden = true; $("#lbTrack")._off?.(); $("#lbTrack").innerHTML = ""; lbURLs.forEach((u) => URL.revokeObjectURL(u)); lbURLs = []; }
 function lbStep(d) { stepTrack($("#lbTrack"), d); }
 $("#lbPrev").addEventListener("click", () => lbStep(-1));
 $("#lbNext").addEventListener("click", () => lbStep(1));
